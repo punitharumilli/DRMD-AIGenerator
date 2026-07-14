@@ -1,0 +1,5 @@
+{
+  "name": "Digital Reference Material Generator",
+  "description": "A React-based application to extract, validate, and export Digital Reference Material Documents (DRMD) using Gemini 2.5 Flash and PDF analysis.",
+  "requestFramePermissions": []
+}
