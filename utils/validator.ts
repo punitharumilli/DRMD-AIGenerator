@@ -19,10 +19,14 @@ export interface ValidationReport {
 export function validateDrmd(data: DRMD): ValidationReport {
     const issues: ValidationIssue[] = [];
 
+    // Safe accessors: guard against partially constructed data
+    const admin = data?.administrativeData;
+    const official = data?.statements?.official;
+
     // ─── SHARED RULES ───────────────────────────────────────────────────
 
     // DRMD-001: title must be non-empty
-    if (!data.administrativeData.title || data.administrativeData.title.trim() === '') {
+    if (!admin?.title || admin?.title.trim() === '') {
         issues.push({
             ruleId: 'DRMD-001',
             severity: 'error',
@@ -52,7 +56,7 @@ export function validateDrmd(data: DRMD): ValidationReport {
     }
 
     // DRMD-004: intendedUse must be non-empty
-    if (!data.statements.official.intendedUse || data.statements.official.intendedUse.trim() === '') {
+    if (!official?.intendedUse || official?.intendedUse.trim() === '') {
         issues.push({
             ruleId: 'DRMD-004',
             severity: 'error',
@@ -62,7 +66,7 @@ export function validateDrmd(data: DRMD): ValidationReport {
     }
 
     // DRMD-005: storageInformation must be non-empty
-    if (!data.statements.official.storageInformation || data.statements.official.storageInformation.trim() === '') {
+    if (!official?.storageInformation || official?.storageInformation.trim() === '') {
         issues.push({
             ruleId: 'DRMD-005',
             severity: 'error',
@@ -72,7 +76,7 @@ export function validateDrmd(data: DRMD): ValidationReport {
     }
 
     // DRMD-006: handlingInstructions must be non-empty
-    if (!data.statements.official.handlingInstructions || data.statements.official.handlingInstructions.trim() === '') {
+    if (!official?.handlingInstructions || official?.handlingInstructions.trim() === '') {
         issues.push({
             ruleId: 'DRMD-006',
             severity: 'error',
@@ -124,7 +128,7 @@ export function validateDrmd(data: DRMD): ValidationReport {
     }
 
     // DRMD-010: at least one producer must exist AND first producer must have a name
-    if (!data.administrativeData.producers || data.administrativeData.producers.length === 0) {
+    if (!admin?.producers || admin?.producers.length === 0) {
         issues.push({
             ruleId: 'DRMD-010',
             severity: 'error',
@@ -132,8 +136,8 @@ export function validateDrmd(data: DRMD): ValidationReport {
             message: 'At least one producer must be defined.',
         });
     } else if (
-        !data.administrativeData.producers[0].name ||
-        data.administrativeData.producers[0].name.trim() === ''
+        !admin?.producers[0].name ||
+        admin?.producers[0].name.trim() === ''
     ) {
         issues.push({
             ruleId: 'DRMD-010',
@@ -144,8 +148,8 @@ export function validateDrmd(data: DRMD): ValidationReport {
     }
 
     // DRMD-012: validity type constraints
-    if (data.administrativeData.validityType === 'Specific Time') {
-        if (!data.administrativeData.specificTime || data.administrativeData.specificTime.trim() === '') {
+    if (admin?.validityType === 'Specific Time') {
+        if (!admin?.specificTime || admin?.specificTime.trim() === '') {
             issues.push({
                 ruleId: 'DRMD-012',
                 severity: 'error',
@@ -153,10 +157,10 @@ export function validateDrmd(data: DRMD): ValidationReport {
                 message: 'Specific Time validity requires a non-empty specificTime value.',
             });
         }
-    } else if (data.administrativeData.validityType === 'Time After Dispatch') {
+    } else if (admin?.validityType === 'Time After Dispatch') {
         if (
-            (!data.administrativeData.durationY || data.administrativeData.durationY <= 0) &&
-            (!data.administrativeData.durationM || data.administrativeData.durationM <= 0)
+            (!admin?.durationY || admin?.durationY <= 0) &&
+            (!admin?.durationM || admin?.durationM <= 0)
         ) {
             issues.push({
                 ruleId: 'DRMD-012',
@@ -169,7 +173,7 @@ export function validateDrmd(data: DRMD): ValidationReport {
     }
 
     // DRMD-013: commutability should be non-empty
-    if (!data.statements.official.commutability || data.statements.official.commutability.trim() === '') {
+    if (!official?.commutability || official?.commutability.trim() === '') {
         issues.push({
             ruleId: 'DRMD-013',
             severity: 'conditional-error',
@@ -193,7 +197,7 @@ export function validateDrmd(data: DRMD): ValidationReport {
     }
 
     // DRMD-015: healthAndSafety should be non-empty
-    if (!data.statements.official.healthAndSafety || data.statements.official.healthAndSafety.trim() === '') {
+    if (!official?.healthAndSafety || official?.healthAndSafety.trim() === '') {
         issues.push({
             ruleId: 'DRMD-015',
             severity: 'warning',
@@ -204,14 +208,14 @@ export function validateDrmd(data: DRMD): ValidationReport {
 
     // ─── CERTIFICATE-ONLY RULES ─────────────────────────────────────────
 
-    const isCertificate = data.administrativeData.title === 'referenceMaterialCertificate';
-    const isPIS = data.administrativeData.title === 'productInformationSheet';
+    const isCertificate = admin?.title === 'referenceMaterialCertificate';
+    const isPIS = admin?.title === 'productInformationSheet';
 
     if (isCertificate) {
         // RMC-001: metrologicalTraceability must be non-empty
         if (
-            !data.statements.official.metrologicalTraceability ||
-            data.statements.official.metrologicalTraceability.trim() === ''
+            !official?.metrologicalTraceability ||
+            official?.metrologicalTraceability.trim() === ''
         ) {
             issues.push({
                 ruleId: 'RMC-001',
@@ -269,8 +273,8 @@ export function validateDrmd(data: DRMD): ValidationReport {
 
         // RMC-010: at least one responsible person with a non-empty name
         if (
-            !data.administrativeData.responsiblePersons ||
-            data.administrativeData.responsiblePersons.length === 0
+            !admin?.responsiblePersons ||
+            admin?.responsiblePersons.length === 0
         ) {
             issues.push({
                 ruleId: 'RMC-010',
@@ -278,7 +282,7 @@ export function validateDrmd(data: DRMD): ValidationReport {
                 section: 'Administrative',
                 message: 'At least one responsible person must be defined for a certificate.',
             });
-        } else if (!data.administrativeData.responsiblePersons.some((rp) => rp.name && rp.name.trim() !== '')) {
+        } else if (!admin?.responsiblePersons.some((rp) => rp.name && rp.name.trim() !== '')) {
             issues.push({
                 ruleId: 'RMC-010',
                 severity: 'error',

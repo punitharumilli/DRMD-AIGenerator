@@ -1115,10 +1115,11 @@ const App: React.FC = () => {
       const files = event.target.files;
       if (!files || files.length === 0) return;
 
-      // Filter to PDF files only
-      const pdfFiles = Array.from(files).filter(f => f.name.toLowerCase().endsWith('.pdf'));
-      if (pdfFiles.length === 0) {
-          setError("No PDF files found in the selected folder.");
+      // Filter to supported document files
+      const supportedExts = ['.pdf', '.doc', '.docx'];
+      const docFiles = Array.from(files).filter(f => supportedExts.some(ext => f.name.toLowerCase().endsWith(ext)));
+      if (docFiles.length === 0) {
+          setError("No supported files found in the selected folder. Supported formats: PDF, DOC, DOCX.");
           return;
       }
 
@@ -1128,27 +1129,38 @@ const App: React.FC = () => {
       setError(null);
       bulkCancelRef.current = false;
       setBulkProcessing(true);
-      setBulkProgress({ current: 0, total: pdfFiles.length, currentFile: '' });
+      setBulkProgress({ current: 0, total: docFiles.length, currentFile: '' });
       setActiveTab("validate-export");
 
       // Initialize all results as pending
-      const initialResults: any[] = pdfFiles.map((f) => ({
+      const initialResults: any[] = docFiles.map((f) => ({
           id: generateUUID(),
           fileName: f.name,
           rmCode: "",
           rmName: "",
           status: 'pending' as const,
           xmlContent: "",
+          htmlContent: "",
           drmdData: JSON.parse(JSON.stringify(INITIAL_DRMD))
       }));
       setBulkResults(initialResults);
 
       // Process sequentially (one at a time for RPM limits)
-      for (let i = 0; i < pdfFiles.length; i++) {
+      for (let i = 0; i < docFiles.length; i++) {
           if (bulkCancelRef.current) break;
 
-          const file = pdfFiles[i];
-          setBulkProgress({ current: i + 1, total: pdfFiles.length, currentFile: file.name });
+          const file = docFiles[i];
+          setBulkProgress({ current: i + 1, total: docFiles.length, currentFile: file.name });
+
+          // Per-file size guard
+          if (file.size > 20 * 1024 * 1024) {
+              setBulkResults(prev => prev.map((r, idx) => idx === i ? {
+                  ...r,
+                  status: 'error' as const,
+                  errorMessage: `File exceeds the 20MB limit (${(file.size / 1024 / 1024).toFixed(1)}MB).`
+              } : r));
+              continue;
+          }
 
           // Mark as processing
           setBulkResults(prev => prev.map((r, idx) => idx === i ? { ...r, status: 'processing' } : r));
@@ -1158,7 +1170,6 @@ const App: React.FC = () => {
               const extractedData = await extractStructuredDataFromPdf(base64Content, file.type || 'application/pdf', geminiApiKey, modelTemperature);
               const mapped = mapExtractedToDrmd(extractedData, file.name, base64Content);
               const xmlContent = generateDrmdXml(mapped);
-              const htmlContent = generateHtmlReport(mapped);
               const { rmCode, rmName } = extractRmInfo(mapped);
 
               setBulkResults(prev => prev.map((r, idx) => idx === i ? {
@@ -1167,7 +1178,7 @@ const App: React.FC = () => {
                   rmCode,
                   rmName,
                   xmlContent,
-                  htmlContent,
+                  htmlContent: "", // Generated on-the-fly to prevent OOM crashes
                   drmdData: mapped
               } : r));
           } catch (err) {
@@ -1237,7 +1248,7 @@ const App: React.FC = () => {
           successResults.forEach(r => {
               const baseName = `${r.rmCode || r.fileName.replace('.pdf', '')}`;
               zip.file(`${baseName}.xml`, r.xmlContent);
-              zip.file(`${baseName}.html`, r.htmlContent);
+              zip.file(`${baseName}.html`, r.htmlContent || generateHtmlReport(r.drmdData));
           });
           const content = await zip.generateAsync({ type: 'blob' });
           const url = URL.createObjectURL(content);
@@ -1259,13 +1270,15 @@ const App: React.FC = () => {
   };
 
   const handleBulkReviewHtml = (result: BulkResult) => {
-      const blob = new Blob([result.htmlContent], { type: 'text/html' });
+      const html = result.htmlContent || generateHtmlReport(result.drmdData);
+      const blob = new Blob([html], { type: 'text/html' });
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank');
   };
 
   const handleBulkDownloadSingleHtml = (result: BulkResult) => {
-      const blob = new Blob([result.htmlContent], { type: 'text/html' });
+      const html = result.htmlContent || generateHtmlReport(result.drmdData);
+      const blob = new Blob([html], { type: 'text/html' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
