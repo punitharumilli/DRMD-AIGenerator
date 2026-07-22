@@ -308,9 +308,9 @@ ${renderValidity(data.administrativeData)}
     let materialsXml = `
   <drmd:materials>`;
     (data.materials || []).forEach(mat => {
-        
+        const matId = mat.xmlId || `mat_${sanitizeForId(mat.name)}`;
         materialsXml += `
-    <drmd:material>
+    <drmd:material id="${escapeXml(matId)}">
       <drmd:name>
         <dcc:content>${escapeXml(mat.name)}</dcc:content>
       </drmd:name>
@@ -343,10 +343,8 @@ ${renderValidity(data.administrativeData)}
             materialsXml += `
       <drmd:materialIdentifiers>`;
             validIds.forEach((id, idx) => {
-                // Add the XML ID to the first identifier (or specifically the catalogNumber one)
-                const idAttr = idx === 0 ? ` id="${escapeXml(mat.xmlId || `mat_${sanitizeForId(mat.name)}`)}"` : '';
                 materialsXml += `
-        <drmd:materialIdentifier${idAttr}>
+        <drmd:materialIdentifier>
           <drmd:scheme>${escapeXml(id.scheme || 'MaterialID')}</drmd:scheme>
           <drmd:value>${escapeXml(id.value)}</drmd:value>
         </drmd:materialIdentifier>`;
@@ -366,6 +364,7 @@ ${renderValidity(data.administrativeData)}
   <drmd:propertiesList>`;
     (data.properties || []).forEach(prop => {
         const certifiedValue = data.administrativeData.title === 'productInformationSheet' ? false : prop.isCertified;
+
         propertiesXml += `
     <drmd:properties isCertified="${certifiedValue}">
       <drmd:name>
@@ -393,22 +392,19 @@ ${renderValidity(data.administrativeData)}
         propertiesXml += `
       <drmd:results>`;
         (prop?.results || []).forEach(res => {
-            // Determine the linked material ID for this specific result table
-            let linkedMaterialId = "";
-            if (res.materialRef) {
-                const mat = data.materials.find(m => m.uuid === res.materialRef);
-                if (mat) linkedMaterialId = mat.xmlId || `mat_${sanitizeForId(mat.name)}`;
+            // Resolve refId for this result: result-level > property-level > single-material auto-link
+            let resultRefId = "";
+            const refSource = res.materialRef || prop.materialRef;
+            if (refSource) {
+                const mat = (data.materials || []).find(m => m.uuid === refSource);
+                if (mat) resultRefId = mat.xmlId || `mat_${sanitizeForId(mat.name)}`;
             } else if (data.materials.length === 1) {
-                linkedMaterialId = data.materials[0].xmlId || `mat_${sanitizeForId(data.materials[0].name)}`;
+                resultRefId = data.materials[0].xmlId || `mat_${sanitizeForId(data.materials[0].name)}`;
             }
+            const resultRefIdAttr = resultRefId ? ` refId="${escapeXml(resultRefId)}"` : '';
 
             propertiesXml += `
-        <drmd:result>`;
-            if (linkedMaterialId) {
-                propertiesXml += `
-          <drmd:linkedMaterialIdentifier id="${escapeXml(linkedMaterialId)}"/>`;
-            }
-            propertiesXml += `
+        <drmd:result${resultRefIdAttr}>
           <drmd:name>
             <dcc:content>${escapeXml(res.name || "Values")}</dcc:content>
           </drmd:name>`;

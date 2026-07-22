@@ -113,11 +113,8 @@ export const parseDrmdXml = (xmlString: string): DRMD => {
     const materials = doc.getElementsByTagName("drmd:material");
     if (materials.length > 0) {
         data.materials = Array.from(materials).map(m => {
-            let xmlId = "";
-            const ids = m.getElementsByTagName("drmd:materialIdentifier");
-            if (ids.length > 0) {
-                xmlId = ids[0].getAttribute("id") || "";
-            }
+            // Read id from <drmd:material id="..."> element
+            let xmlId = m.getAttribute("id") || "";
 
             const mat: Material = {
                 uuid: uuid(),
@@ -175,14 +172,12 @@ export const parseDrmdXml = (xmlString: string): DRMD => {
 
             const results = p.getElementsByTagName("drmd:result");
             prop.results = Array.from(results).map(r => {
-                const linkTag = r.getElementsByTagName("drmd:linkedMaterialIdentifier")[0];
+                // Read refId from <drmd:result refId="..."> and resolve to material UUID
                 let refMatId = "";
-                if (linkTag) {
-                    const idAttr = linkTag.getAttribute("id");
-                    if (idAttr) {
-                        const matchedMat = data.materials.find(m => m.xmlId === idAttr);
-                        if (matchedMat) refMatId = matchedMat.uuid;
-                    }
+                const refId = r.getAttribute("refId");
+                if (refId) {
+                    const matchedMat = data.materials.find(m => m.xmlId === refId);
+                    if (matchedMat) refMatId = matchedMat.uuid;
                 }
 
                 const res: MeasurementResult = {

@@ -925,6 +925,11 @@ const App: React.FC = () => {
               description: p.description || "",
               procedures: p.procedures || "",
               isCertified: !!p.isCertified,
+              // Auto-link property to material: use single material if only one exists,
+              // otherwise try to infer from the first result's materialRef
+              materialRef: newMats.length === 1
+                  ? newMats[0].uuid
+                  : (finalResults.find((r: any) => r.materialRef)?.materialRef || undefined),
               results: finalResults,
               originalTexts: parseOriginalTexts(p.originalTexts)
           };
@@ -1039,12 +1044,12 @@ const App: React.FC = () => {
           setError(`File ${file.name} exceeds the 20MB limit.`);
           return;
       }
-      // Validation: Type (PDF, DOCX, DOC)
-      const validTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/msword'];
-      const validExts = ['.pdf', '.doc', '.docx'];
+      // Validation: Type (PDF)
+      const validTypes = ['application/pdf'];
+      const validExts = ['.pdf'];
       const isValid = validTypes.includes(file.type) || validExts.some(ext => file.name.toLowerCase().endsWith(ext));
       if (!isValid) {
-          setError(`File ${file.name} is not a valid PDF or Word document.`);
+          setError(`File ${file.name} is not a valid PDF document.`);
           return;
       }
 
@@ -1115,11 +1120,10 @@ const App: React.FC = () => {
       const files = event.target.files;
       if (!files || files.length === 0) return;
 
-      // Filter to supported document files
-      const supportedExts = ['.pdf', '.doc', '.docx'];
-      const docFiles = Array.from(files).filter(f => supportedExts.some(ext => f.name.toLowerCase().endsWith(ext)));
-      if (docFiles.length === 0) {
-          setError("No supported files found in the selected folder. Supported formats: PDF, DOC, DOCX.");
+      // Filter to PDF files only
+      const pdfFiles = Array.from(files).filter(f => f.name.toLowerCase().endsWith('.pdf'));
+      if (pdfFiles.length === 0) {
+          setError("No PDF files found in the selected folder.");
           return;
       }
 
@@ -1129,11 +1133,11 @@ const App: React.FC = () => {
       setError(null);
       bulkCancelRef.current = false;
       setBulkProcessing(true);
-      setBulkProgress({ current: 0, total: docFiles.length, currentFile: '' });
+      setBulkProgress({ current: 0, total: pdfFiles.length, currentFile: '' });
       setActiveTab("validate-export");
 
       // Initialize all results as pending
-      const initialResults: any[] = docFiles.map((f) => ({
+      const initialResults: any[] = pdfFiles.map((f) => ({
           id: generateUUID(),
           fileName: f.name,
           rmCode: "",
@@ -1146,11 +1150,11 @@ const App: React.FC = () => {
       setBulkResults(initialResults);
 
       // Process sequentially (one at a time for RPM limits)
-      for (let i = 0; i < docFiles.length; i++) {
+      for (let i = 0; i < pdfFiles.length; i++) {
           if (bulkCancelRef.current) break;
 
-          const file = docFiles[i];
-          setBulkProgress({ current: i + 1, total: docFiles.length, currentFile: file.name });
+          const file = pdfFiles[i];
+          setBulkProgress({ current: i + 1, total: pdfFiles.length, currentFile: file.name });
 
           // Per-file size guard
           if (file.size > 20 * 1024 * 1024) {
@@ -1641,7 +1645,7 @@ const App: React.FC = () => {
           <div className="flex justify-between items-center">
               <SectionHeader title="Properties" icon="📊" />
               <button onClick={() => setDrmdData(p => ({...p, properties: [...p.properties, {
-                  uuid: generateUUID(), id: "", name: "New Property Set", isCertified: true, description: "", procedures: "", results: []
+                  uuid: generateUUID(), id: "", name: "New Property Set", isCertified: true, description: "", procedures: "", materialRef: undefined, results: []
               }]}))} className="text-sm bg-indigo-50 text-indigo-600 px-3 py-1 rounded hover:bg-indigo-100 font-medium">+ Add Property Set</button>
           </div>
 
@@ -1676,6 +1680,19 @@ const App: React.FC = () => {
                         <div className="grid grid-cols-2 gap-4">
                             <TextArea label="Description" value={prop.description} onChange={(v) => { const list = [...drmdData.properties]; list[pIdx].description = v; setDrmdData(p => ({...p, properties: list})); }} onInfoClick={() => handleHighlight(prop.description)} />
                             <TextArea label="Procedures" value={prop.procedures} onChange={(v) => { const list = [...drmdData.properties]; list[pIdx].procedures = v; setDrmdData(p => ({...p, properties: list})); }} onInfoClick={() => handleHighlight(prop.procedures)} />
+                        </div>
+                        <div className="mt-2">
+                            <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Linked Material (refId)</label>
+                            <select
+                                value={prop.materialRef || ""}
+                                onChange={(e) => { const list = [...drmdData.properties]; list[pIdx].materialRef = e.target.value || undefined; setDrmdData(p => ({...p, properties: list})); }}
+                                className="text-sm border border-gray-300 rounded px-2 py-1.5 w-full max-w-md bg-white"
+                            >
+                                <option value="">— None —</option>
+                                {drmdData.materials.map(m => (
+                                    <option key={m.uuid} value={m.uuid}>{m.xmlId || m.name || "Unnamed Material"}</option>
+                                ))}
+                            </select>
                         </div>
                         
                         <div className="space-y-6 mt-4">
@@ -1881,11 +1898,11 @@ const App: React.FC = () => {
                 alert("File size exceeds 200MB limit.");
                 return;
             }
-            const allowedTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'];
-            const allowedExts = ['pdf', 'doc', 'docx', 'txt'];
+            const allowedTypes = ['application/pdf'];
+            const allowedExts = ['pdf'];
             const ext = file.name.split('.').pop()?.toLowerCase();
             if (!allowedTypes.includes(file.type) && !allowedExts.includes(ext || '')) {
-                alert("Only PDF, DOC, DOCX, and TXT files are allowed.");
+                alert("Only PDF files are allowed.");
                 return;
             }
             const reader = new FileReader();
@@ -1959,7 +1976,7 @@ const App: React.FC = () => {
                       type="file" 
                       id="doc-upload"
                       className="hidden" 
-                      accept=".pdf,.doc,.docx,.txt"
+                      accept=".pdf"
                       onChange={handleDocUpload}
                   />
                   <label htmlFor="doc-upload" className="cursor-pointer bg-white border border-gray-300 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-50 text-gray-700 shadow-sm">
@@ -2322,10 +2339,10 @@ const App: React.FC = () => {
             </div>
         </div>
         <div className="flex gap-3">
-          <input type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
+          <input type="file" accept="application/pdf" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
           <input type="file" accept="text/xml" ref={xmlInputRef} onChange={handleXmlImport} className="hidden" />
           {/* @ts-ignore */}
-          <input type="file" ref={bulkFolderInputRef} onChange={handleBulkUpload} className="hidden" multiple accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" webkitdirectory="" directory="" />
+          <input type="file" ref={bulkFolderInputRef} onChange={handleBulkUpload} className="hidden" multiple accept="application/pdf" webkitdirectory="" directory="" />
           
           <button onClick={() => fileInputRef.current?.click()} className="bg-gray-100 hover:bg-gray-200 transition px-4 py-2 rounded-md text-sm font-medium flex items-center gap-2 text-gray-700 border border-gray-300">
             📄 Upload PDF

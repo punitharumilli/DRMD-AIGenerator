@@ -99,6 +99,7 @@ export interface MaterialProperty {
     description: string;
     isCertified: boolean;
     procedures: string;
+    materialRef?: string; // UUID of linked material — generates refId on <drmd:properties>
     results: MeasurementResult[];
 }
 
