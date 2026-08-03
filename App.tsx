@@ -772,6 +772,13 @@ const App: React.FC = () => {
 
       const prev = JSON.parse(JSON.stringify(INITIAL_DRMD)) as DRMD;
 
+      // Determine document type early so we can apply mandatory-field defaults
+      const determinedTitle = ALLOWED_TITLES.includes(extractedData?.administrativeData?.title as string)
+          ? (extractedData?.administrativeData?.title as string)
+          : "referenceMaterialCertificate";
+      const isCertificate = determinedTitle === "referenceMaterialCertificate";
+      const NOT_AVAILABLE = "Information Not Available / Information not retrieved by AI";
+
       const newMats = (extractedData?.materials || []).map((m: any) => {
           const name = m.name || "";
           const sanitizeForId = (s: string) => s ? s.replace(/[^a-zA-Z0-9_-]/g, "_") : "unknown";
@@ -783,10 +790,10 @@ const App: React.FC = () => {
                   ? m.materialIdentifiers
                   : [{...INITIAL_ID}],
               name: name,
-              description: m.description || "",
+              description: m.description || (isCertificate ? NOT_AVAILABLE : ""),
               materialClass: m.materialClass || "",
-              itemQuantities: m.itemQuantities || "",
-              minimumSampleSize: m.minimumSampleSize || "",
+              itemQuantities: m.itemQuantities || "noQuantity",
+              minimumSampleSize: m.minimumSampleSize || "noQuantity",
               isCertified: !!m.isCertified,
               fieldCoordinates: m.fieldCoordinates,
               sectionCoordinates: m.sectionCoordinates,
@@ -935,6 +942,112 @@ const App: React.FC = () => {
           };
       });
 
+      // Post-processing: Split properties by method when quantities have per-row methods
+      // (e.g., tables with a "USED METHODS" column — each unique method becomes its own property)
+      const finalProps: any[] = [];
+      newProps.forEach((prop: any) => {
+          // Collect all methods from all quantities across all results
+          const allQuantities: any[] = [];
+          (prop.results || []).forEach((r: any) => {
+              (r.quantities || []).forEach((q: any) => {
+                  allQuantities.push({ ...q, _resultName: r.name, _resultDesc: r.description, _resultRef: r.materialRef, _resultCoords: r.sectionCoordinates, _resultOrigTexts: r.originalTexts, _coverageReasoning: r.coverageReasoning });
+              });
+          });
+
+          // Check if any quantity has a method
+          const hasAnyMethod = allQuantities.some((q: any) => q.method && q.method.trim());
+          if (!hasAnyMethod) {
+              // No methods — keep property as-is
+              finalProps.push(prop);
+              return;
+          }
+
+          // Group quantities by method
+          const methodGroups: Record<string, any[]> = {};
+          const noMethodQuantities: any[] = [];
+          allQuantities.forEach((q: any) => {
+              const method = (q.method || "").trim();
+              if (method) {
+                  if (!methodGroups[method]) methodGroups[method] = [];
+                  methodGroups[method].push(q);
+              } else {
+                  noMethodQuantities.push(q);
+              }
+          });
+
+          // If all quantities share the same method, just set procedures on the existing property
+          const uniqueMethods = Object.keys(methodGroups);
+          if (uniqueMethods.length === 1 && noMethodQuantities.length === 0) {
+              prop.procedures = uniqueMethods[0];
+              finalProps.push(prop);
+              return;
+          }
+
+          // Multiple methods: split into separate properties per method
+          uniqueMethods.forEach((method: string) => {
+              const methodQs = methodGroups[method];
+              // Build result(s) for this method group
+              const resultName = methodQs[0]?._resultName || "Values";
+              const resultDesc = methodQs[0]?._resultDesc || "";
+              const resultRef = methodQs[0]?._resultRef;
+              const resultCoords = methodQs[0]?._resultCoords;
+              const resultOrigTexts = methodQs[0]?._resultOrigTexts;
+              const coverageReasoning = methodQs[0]?._coverageReasoning || "";
+              // Clean method-internal fields from quantities
+              const cleanQs = methodQs.map((q: any) => {
+                  const { method: _m, _resultName: _rn, _resultDesc: _rd, _resultRef: _rr, _resultCoords: _rc, _resultOrigTexts: _ro, _coverageReasoning: _cr, ...rest } = q;
+                  return rest;
+              });
+              finalProps.push({
+                  ...prop,
+                  uuid: generateUUID(),
+                  procedures: method,
+                  materialRef: resultRef || prop.materialRef,
+                  results: [{
+                      uuid: generateUUID(),
+                      name: resultName,
+                      description: resultDesc,
+                      coverageReasoning: coverageReasoning,
+                      materialRef: resultRef,
+                      quantities: cleanQs,
+                      sectionCoordinates: resultCoords,
+                      originalTexts: resultOrigTexts
+                  }]
+              });
+          });
+
+          // If there are quantities without a method, keep them in a separate property
+          if (noMethodQuantities.length > 0) {
+              const resultName = noMethodQuantities[0]?._resultName || "Values";
+              const resultDesc = noMethodQuantities[0]?._resultDesc || "";
+              const resultRef = noMethodQuantities[0]?._resultRef;
+              const resultCoords = noMethodQuantities[0]?._resultCoords;
+              const resultOrigTexts = noMethodQuantities[0]?._resultOrigTexts;
+              const coverageReasoning = noMethodQuantities[0]?._coverageReasoning || "";
+              const cleanQs = noMethodQuantities.map((q: any) => {
+                  const { method: _m, _resultName: _rn, _resultDesc: _rd, _resultRef: _rr, _resultCoords: _rc, _resultOrigTexts: _ro, _coverageReasoning: _cr, ...rest } = q;
+                  return rest;
+              });
+              finalProps.push({
+                  ...prop,
+                  uuid: generateUUID(),
+                  procedures: prop.procedures || "",
+                  materialRef: resultRef || prop.materialRef,
+                  results: [{
+                      uuid: generateUUID(),
+                      name: resultName,
+                      description: resultDesc,
+                      coverageReasoning: coverageReasoning,
+                      materialRef: resultRef,
+                      quantities: cleanQs,
+                      sectionCoordinates: resultCoords,
+                      originalTexts: resultOrigTexts
+                  }]
+              });
+          }
+      });
+
+
       const newProds = (extractedData?.administrativeData?.producers || []).map((p: any) => {
           let countryCode = p.address?.countryCode || "";
           const city = p.address?.city || "";
@@ -962,7 +1075,9 @@ const App: React.FC = () => {
           };
       });
 
-      const newPersons = (extractedData?.administrativeData?.responsiblePersons || []).map((p: any, index: number) => ({
+      // Helper: split responsible persons whose names are still concatenated (safety net for LLM)
+      const splitPersonSeparatorRegex = /\s+\/\s+|\s+&\s+|\s+and\s+/i;
+      const rawPersons = (extractedData?.administrativeData?.responsiblePersons || []).map((p: any, index: number) => ({
           ...INITIAL_PERSON,
           uuid: generateUUID(),
           name: p.name || "",
@@ -973,6 +1088,34 @@ const App: React.FC = () => {
           sectionCoordinates: p.sectionCoordinates,
           originalTexts: parseOriginalTexts(p.originalTexts)
       }));
+
+      // Post-processing: split combined names like "Dr. Smith / Prof. Garcia & Dr. Müller"
+      const newPersons: any[] = [];
+      rawPersons.forEach((person: any, personIndex: number) => {
+          const nameParts = person.name.split(splitPersonSeparatorRegex).map((s: string) => s.trim()).filter((s: string) => s);
+          const roleParts = person.role.split(splitPersonSeparatorRegex).map((s: string) => s.trim()).filter((s: string) => s);
+
+          // Only split if we have multiple name parts AND the role count matches (or there's only 1 role for all)
+          if (nameParts.length > 1 && (roleParts.length === nameParts.length || roleParts.length === 1)) {
+              nameParts.forEach((name: string, i: number) => {
+                  newPersons.push({
+                      ...INITIAL_PERSON,
+                      uuid: generateUUID(),
+                      name: name,
+                      role: roleParts.length === nameParts.length ? roleParts[i] : roleParts[0],
+                      description: person.description,
+                      mainSigner: personIndex === 0 && i === 0,
+                      // Share coordinates from the original combined entry
+                      fieldCoordinates: person.fieldCoordinates,
+                      sectionCoordinates: person.sectionCoordinates,
+                      originalTexts: person.originalTexts
+                  });
+              });
+          } else {
+              // No splitting needed — keep as-is
+              newPersons.push(person);
+          }
+      });
 
       let validType = prev.administrativeData.validityType;
       if (extractedData?.administrativeData?.validityType) {
@@ -987,9 +1130,7 @@ const App: React.FC = () => {
           administrativeData: {
               ...prev.administrativeData,
               uniqueIdentifier: extractedData?.administrativeData?.uniqueIdentifier || prev.administrativeData.uniqueIdentifier || generateUUID(),
-              title: ALLOWED_TITLES.includes(extractedData?.administrativeData?.title as string)
-                  ? (extractedData?.administrativeData?.title as string)
-                  : "referenceMaterialCertificate",
+              title: determinedTitle,
               dataVersion: prev.administrativeData.dataVersion,
               validityType: validType,
               durationY: extractedData?.administrativeData?.durationY ?? prev.administrativeData.durationY,
@@ -1005,11 +1146,11 @@ const App: React.FC = () => {
           statements: {
               ...prev.statements,
               official: {
-                  intendedUse: extractedData?.statements?.official?.intendedUse || "",
+                  intendedUse: extractedData?.statements?.official?.intendedUse || NOT_AVAILABLE,
                   commutability: extractedData?.statements?.official?.commutability || "",
-                  storageInformation: extractedData?.statements?.official?.storageInformation || "",
-                  handlingInstructions: extractedData?.statements?.official?.handlingInstructions || "",
-                  metrologicalTraceability: extractedData?.statements?.official?.metrologicalTraceability || "",
+                  storageInformation: extractedData?.statements?.official?.storageInformation || NOT_AVAILABLE,
+                  handlingInstructions: extractedData?.statements?.official?.handlingInstructions || NOT_AVAILABLE,
+                  metrologicalTraceability: extractedData?.statements?.official?.metrologicalTraceability || (isCertificate ? NOT_AVAILABLE : ""),
                   healthAndSafety: extractedData?.statements?.official?.healthAndSafety || "",
                   subcontractors: extractedData?.statements?.official?.subcontractors || "",
                   legalNotice: extractedData?.statements?.official?.legalNotice || "",
@@ -1019,7 +1160,7 @@ const App: React.FC = () => {
               }
           },
           materials: newMats.length > 0 ? newMats : prev.materials,
-          properties: newProps.length > 0 ? newProps : prev.properties,
+          properties: finalProps.length > 0 ? finalProps : prev.properties,
           generalComment: "For additional information please refer to the pdf certificate",
           binaryDocuments: [{
               fileName: fileName,
@@ -1390,7 +1531,7 @@ const App: React.FC = () => {
                       value={geminiApiKey}
                       onChange={(e) => setGeminiApiKey(e.target.value)}
                       placeholder="Enter Google Gemini API Key..."
-                      className="w-full border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      className="w-full border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-blue-600 outline-none"
                   />
                   <p className="text-xs text-gray-500 mt-1">Used for extracting data from PDF (Gemini 1.5 Pro/Flash or 2.0).</p>
               </div>
@@ -1403,7 +1544,7 @@ const App: React.FC = () => {
                       step="0.1"
                       value={modelTemperature}
                       onChange={(e) => setModelTemperature(parseFloat(e.target.value))}
-                      className="w-full accent-indigo-600"
+                      className="w-full accent-blue-700"
                   />
                   <div className="flex justify-between text-xs text-gray-500 mt-1 font-medium">
                       <span>More Deterministic (0)</span>
@@ -1490,7 +1631,7 @@ const App: React.FC = () => {
         <div className="space-y-4 border p-4 rounded-lg bg-white shadow-sm">
             <div className="flex justify-between items-center border-b pb-2">
                 <SectionHeader title="Reference Material Producer" icon="🏢" />
-                <button onClick={() => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, producers: [...p.administrativeData.producers, {...INITIAL_PRODUCER, uuid: generateUUID()}]}}))} className="text-sm bg-indigo-50 text-indigo-600 px-3 py-1 rounded hover:bg-indigo-100 font-medium">+ Add Producer</button>
+                <button onClick={() => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, producers: [...p.administrativeData.producers, {...INITIAL_PRODUCER, uuid: generateUUID()}]}}))} className="text-sm bg-blue-50 text-blue-700 px-3 py-1 rounded hover:bg-blue-100 font-medium">+ Add Producer</button>
             </div>
             {drmdData.administrativeData.producers.map((prod, idx) => (
                 <div key={prod.uuid} className="bg-gray-50 border border-gray-200 p-4 rounded-lg space-y-3 relative mb-4">
@@ -1529,7 +1670,7 @@ const App: React.FC = () => {
         <div className="space-y-4 border p-4 rounded-lg bg-white shadow-sm">
             <div className="flex justify-between items-center border-b pb-2">
                 <SectionHeader title="Responsible Persons" icon="👥" />
-                <button onClick={() => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, responsiblePersons: [...p.administrativeData.responsiblePersons, {...INITIAL_PERSON, uuid: generateUUID()}]}}))} className="text-sm bg-indigo-50 text-indigo-600 px-3 py-1 rounded hover:bg-indigo-100 font-medium">+ Add Person</button>
+                <button onClick={() => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, responsiblePersons: [...p.administrativeData.responsiblePersons, {...INITIAL_PERSON, uuid: generateUUID()}]}}))} className="text-sm bg-blue-50 text-blue-700 px-3 py-1 rounded hover:bg-blue-100 font-medium">+ Add Person</button>
             </div>
             {drmdData.administrativeData.responsiblePersons.map((rp, idx) => (
                 <div key={rp.uuid} className="bg-white border border-gray-200 p-4 rounded-lg shadow-sm space-y-3 relative mb-4">
@@ -1566,7 +1707,7 @@ const App: React.FC = () => {
             <SectionHeader title="Materials" icon="🧪" />
             <button onClick={() => setDrmdData(p => ({...p, materials: [...p.materials, {
                 uuid: generateUUID(), xmlId: `mat_unknown`, name: "", description: "", materialClass: "", itemQuantities: "", minimumSampleSize: "", isCertified: false, materialIdentifiers: [{...INITIAL_ID}]
-            }]}))} className="text-sm bg-indigo-50 text-indigo-600 px-3 py-1 rounded hover:bg-indigo-100 font-medium">+ Add Material</button>
+            }]}))} className="text-sm bg-blue-50 text-blue-700 px-3 py-1 rounded hover:bg-blue-100 font-medium">+ Add Material</button>
         </div>
         
         {drmdData.materials.map((mat, idx) => (
@@ -1646,7 +1787,7 @@ const App: React.FC = () => {
               <SectionHeader title="Properties" icon="📊" />
               <button onClick={() => setDrmdData(p => ({...p, properties: [...p.properties, {
                   uuid: generateUUID(), id: "", name: "New Property Set", isCertified: true, description: "", procedures: "", materialRef: undefined, results: []
-              }]}))} className="text-sm bg-indigo-50 text-indigo-600 px-3 py-1 rounded hover:bg-indigo-100 font-medium">+ Add Property Set</button>
+              }]}))} className="text-sm bg-blue-50 text-blue-700 px-3 py-1 rounded hover:bg-blue-100 font-medium">+ Add Property Set</button>
           </div>
 
           {drmdData.properties.map((prop, pIdx) => (
@@ -1833,7 +1974,7 @@ const App: React.FC = () => {
                                                 const list = [...drmdData.properties]; 
                                                 list[pIdx].results[rIdx].quantities.push({ ...INITIAL_QUANTITY, uuid: generateUUID(), identifiers: [] });
                                                 setDrmdData(p => ({...p, properties: list}));
-                                            }} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">+ Add Row</button>
+                                            }} className="text-xs text-blue-700 hover:text-blue-900 font-medium">+ Add Row</button>
                                         </div>
                                     </div>
                                 </div>
@@ -1849,7 +1990,7 @@ const App: React.FC = () => {
                                     });
                                     setDrmdData(p => ({...p, properties: list}));
                                 }}
-                                className="w-full py-2 border-2 border-dashed border-indigo-200 bg-indigo-50/50 text-indigo-600 rounded-lg hover:bg-indigo-50 hover:border-indigo-300 transition-colors font-medium text-sm flex items-center justify-center gap-2"
+                                className="w-full py-2 border-2 border-dashed border-blue-200 bg-blue-50/50 text-blue-700 rounded-lg hover:bg-blue-50 hover:border-blue-300 transition-colors font-medium text-sm flex items-center justify-center gap-2"
                             >
                                 <span className="text-lg font-bold">+</span> Add Table
                             </button>
@@ -1886,7 +2027,7 @@ const App: React.FC = () => {
                   </div>
               </div>
           ))}
-          <button onClick={() => setDrmdData(p => ({...p, statements: {...p.statements, custom: [...p.statements.custom, { uuid: generateUUID(), name: "", content: "" }]}}))} className="bg-indigo-50 text-indigo-600 px-4 py-2 rounded hover:bg-indigo-100 text-sm font-semibold">+ Add Statement</button>
+          <button onClick={() => setDrmdData(p => ({...p, statements: {...p.statements, custom: [...p.statements.custom, { uuid: generateUUID(), name: "", content: "" }]}}))} className="bg-blue-50 text-blue-700 px-4 py-2 rounded hover:bg-blue-100 text-sm font-semibold">+ Add Statement</button>
       </div>
   );
 
@@ -1932,7 +2073,7 @@ const App: React.FC = () => {
           <div className="space-y-4">
               <h3 className="text-sm font-bold text-gray-700 uppercase tracking-wide">Comment</h3>
               <textarea 
-                  className="w-full border border-gray-300 rounded-md p-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none h-32"
+                  className="w-full border border-gray-300 rounded-md p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none h-32"
                   placeholder="Enter your comment"
                   value={drmdData.generalComment}
                   onChange={(e) => setDrmdData(p => ({...p, generalComment: e.target.value}))}
@@ -1968,8 +2109,8 @@ const App: React.FC = () => {
                   </div>
               )}
 
-              <div className="border-2 border-dashed border-indigo-200 bg-indigo-50/30 rounded-lg p-8 flex flex-col items-center justify-center text-center transition hover:bg-indigo-50">
-                  <div className="text-4xl mb-2 text-indigo-300">☁️</div>
+              <div className="border-2 border-dashed border-blue-200 bg-blue-50/30 rounded-lg p-8 flex flex-col items-center justify-center text-center transition hover:bg-blue-50">
+                  <div className="text-4xl mb-2 text-blue-300">☁️</div>
                   <p className="font-medium text-gray-700">Drag and drop file here</p>
                   <p className="text-xs text-gray-500 mt-1 mb-4">Limit 200MB per file • PDF, DOC, DOCX, TXT</p>
                   <input 
@@ -2081,7 +2222,7 @@ const App: React.FC = () => {
                                         <button 
                                             onClick={handleBulkDownloadAll}
                                             disabled={bulkProcessing || bulkResults.filter(r => r.status === 'done').length === 0}
-                                            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-bold disabled:opacity-50 transition shadow-sm text-sm"
+                                            className="bg-blue-700 hover:bg-blue-800 text-white px-4 py-2 rounded-lg font-bold disabled:opacity-50 transition shadow-sm text-sm"
                                         >
                                             ⬇ Download All (ZIP)
                                         </button>
@@ -2137,7 +2278,7 @@ const App: React.FC = () => {
                                                                 <span className="text-[10px] uppercase font-bold text-gray-400 self-center mr-1">XML</span>
                                                                 <button
                                                                     onClick={() => handleBulkReview(result)}
-                                                                    className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-2 py-1 rounded text-xs font-bold transition border border-indigo-200"
+                                                                    className="bg-blue-50 hover:bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-bold transition border border-blue-200"
                                                                 >
                                                                     🔍 Review
                                                                 </button>
@@ -2262,7 +2403,7 @@ const App: React.FC = () => {
                           <span>XML Preview</span>
                           <button 
                               onClick={() => navigator.clipboard.writeText(xmlPreview)}
-                              className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                              className="text-xs text-blue-700 hover:text-blue-900 font-medium"
                           >
                               Copy Code
                           </button>
@@ -2280,7 +2421,7 @@ const App: React.FC = () => {
                               disabled={!isValid}
                               className={`w-full py-3 rounded-lg font-bold text-white flex justify-center items-center gap-2 shadow-sm transition-all ${
                                   isValid 
-                                  ? 'bg-indigo-600 hover:bg-indigo-700 hover:shadow' 
+                                  ? 'bg-blue-700 hover:bg-blue-800 hover:shadow' 
                                   : 'bg-gray-400 cursor-not-allowed opacity-70'
                               }`}
                           >
@@ -2295,7 +2436,7 @@ const App: React.FC = () => {
                  <div className="bg-white border border-gray-200 rounded-lg shadow-sm flex flex-col h-[800px]">
                       <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 font-bold text-gray-700 text-sm flex justify-between items-center">
                           <span>Preview</span>
-                          <button onClick={handleHtmlExport} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Download HTML</button>
+                          <button onClick={handleHtmlExport} className="text-xs text-blue-700 hover:text-blue-900 font-medium">Download HTML</button>
                       </div>
                       <div className="flex-1 p-0 bg-white overflow-hidden relative">
                            <iframe 
@@ -2305,7 +2446,7 @@ const App: React.FC = () => {
                            />
                       </div>
                       <div className="p-4 bg-gray-50 border-t border-gray-200">
-                           <button onClick={handleHtmlExport} className="w-full py-3 rounded-lg font-bold text-white flex justify-center items-center gap-2 shadow-sm bg-indigo-600 hover:bg-indigo-700 transition-all">
+                           <button onClick={handleHtmlExport} className="w-full py-3 rounded-lg font-bold text-white flex justify-center items-center gap-2 shadow-sm bg-blue-700 hover:bg-blue-800 transition-all">
                               <span>📄</span> Download HTML Report
                           </button>
                       </div>
@@ -2332,7 +2473,7 @@ const App: React.FC = () => {
     <div className="h-screen flex flex-col bg-gray-50 font-sans text-gray-900">
       <header className="bg-white border-b border-gray-200 p-4 flex justify-between items-center z-10 shadow-sm">
         <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-indigo-700 rounded-lg flex items-center justify-center text-white text-xl">🔬</div>
+            <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-blue-800 rounded-lg flex items-center justify-center text-white text-xl">🔬</div>
             <div>
                 <h1 className="text-lg font-bold text-gray-800">DRMD Generator</h1>
                 <p className="text-xs text-gray-500">Internal Testing v1.0.0-alpha</p>
@@ -2356,7 +2497,7 @@ const App: React.FC = () => {
             📤 Import XML
           </button>
 
-          <button onClick={handleExport} className="bg-indigo-600 text-white hover:bg-indigo-700 transition px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 shadow-sm">
+          <button onClick={handleExport} className="bg-blue-700 text-white hover:bg-blue-800 transition px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 shadow-sm">
             💾 Export XML
           </button>
         </div>
@@ -2381,7 +2522,7 @@ const App: React.FC = () => {
           
           {isProcessing && (
             <div className="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center text-white z-50">
-              <div className="animate-spin rounded-full h-12 w-12 border-4 border-indigo-500 border-t-transparent mb-4"></div>
+              <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent mb-4"></div>
               <p className="font-bold text-lg">Processing Document...</p>
               <p className="text-sm text-gray-400 mt-1">{statusMessage}</p>
             </div>
@@ -2396,7 +2537,7 @@ const App: React.FC = () => {
                   
                   <div className="w-full bg-gray-700 rounded-full h-4 overflow-hidden mb-3">
                       <div 
-                          className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full transition-all duration-500"
+                          className="h-full bg-gradient-to-r from-blue-500 to-blue-700 rounded-full transition-all duration-500"
                           style={{ width: `${bulkProgress.total > 0 ? Math.round((bulkProgress.current / bulkProgress.total) * 100) : 0}%` }}
                       ></div>
                   </div>
@@ -2464,7 +2605,7 @@ const App: React.FC = () => {
                 onClick={() => setActiveTab(tab.id)}
                 className={`flex items-center gap-2 px-5 py-4 text-sm font-medium transition-all border-b-2 min-w-max ${
                   activeTab === tab.id
-                    ? 'border-indigo-600 text-indigo-700 bg-white'
+                    ? 'border-blue-700 text-blue-800 bg-white'
                     : 'border-transparent text-gray-500 hover:text-gray-800 hover:bg-gray-100'
                 }`}
               >
@@ -2520,7 +2661,7 @@ const Input: React.FC<{ label: string; value: any; onChange: (v: string) => void
             onChange={(e) => onChange(e.target.value)}
             disabled={disabled}
             onFocus={onFocus}
-            className={`w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow ${disabled ? 'bg-gray-100 text-gray-400' : 'bg-white'}`}
+            className={`w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-2 focus:ring-blue-600 focus:border-blue-600 outline-none transition-shadow ${disabled ? 'bg-gray-100 text-gray-400' : 'bg-white'}`}
         />
     </div>
 );
@@ -2547,7 +2688,7 @@ const Select: React.FC<{ label: string; value: string; options: string[]; onChan
             value={value || ''}
             onChange={(e) => onChange(e.target.value)}
             onFocus={onFocus}
-            className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none bg-white"
+            className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-2 focus:ring-blue-600 focus:border-blue-600 outline-none bg-white"
         >
             {options.map(o => <option key={o} value={o}>{o.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase()).trim()}</option>)}
         </select>
@@ -2576,7 +2717,7 @@ const TextArea: React.FC<{ label: string; value: string; onChange: (v: string) =
             value={value || ''}
             onChange={(e) => onChange(e.target.value)}
             onFocus={onFocus}
-            className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none min-h-[80px]"
+            className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-2 focus:ring-blue-600 focus:border-blue-600 outline-none min-h-[80px]"
         />
     </div>
 );

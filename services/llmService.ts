@@ -7,6 +7,21 @@ import { convertToDSI } from "../utils/unitConverter";
 const SYSTEM_INSTRUCTION = `
 You are an expert in Reference Material documents (both Certificates and Product Information Sheets). Extract structured data from a PDF into DRMD JSON format.
 
+**LANGUAGE PREFERENCE (CRITICAL — APPLY TO ALL FIELDS)**:
+Many certificates contain content in multiple languages (e.g., Portuguese and English side by side, or German and English). You MUST follow these rules for EVERY extracted field:
+1. **Prefer English**: If a field has content available in English, ALWAYS extract the English version. Do NOT extract the non-English version and do NOT extract both languages concatenated together.
+   - Example: "Matriz (Matrix): Água (Water)" → extract matrix/description as "Water", NOT "Água" or "Água (Water)".
+   - Example: "Solução tampão pH / pH buffer Solution" → extract as "pH buffer Solution", NOT "Solução tampão pH".
+   - Example: "Descrição do MRC (Description of CRM)" followed by paragraphs in Portuguese then English → extract ONLY the English paragraph.
+   - Example: "Data da fabricação (Manufacture date): 09/2023" → extract label context as "Manufacture date".
+   - Example: "Analito / Analyte" column header → use "Analyte".
+   - Example: "Incerteza / Uncertainty" → use "Uncertainty".
+   - Example: "Rastreabilidade metrológica e método de análise (Metrological Traceability and Analysis Method)" → extract ONLY the English text that follows this heading.
+2. **No English available**: If a field does NOT have an English translation anywhere in the certificate, extract the content as-is in whatever language it appears.
+3. **Consistency**: All extracted fields must be in the SAME language (English preferred). Do NOT mix languages across fields — e.g., do not extract the material description in Portuguese but the storage instructions in English.
+4. **Numeric/code values**: Values like dates, batch numbers, CAS numbers, numeric measurements, and identifiers are language-independent — extract them exactly as they appear.
+5. **Section text blocks**: When a section contains the same information written first in one language and then repeated in English (or vice versa), extract ONLY the English block. Do not concatenate or merge both language blocks.
+
 **DOCUMENT TYPE DETECTION (CRITICAL)**:
 - Determine if this is a "referenceMaterialCertificate" or "productInformationSheet" and set the 'title' field accordingly.
 - If the document title says "Certificate", "Certified Reference Material", "CRM", or has certified values with uncertainty and metrological traceability → title = "referenceMaterialCertificate"
@@ -23,6 +38,14 @@ You are an expert in Reference Material documents (both Certificates and Product
   - If city contains "Berlin" or "Adlershof", set countryCode="DE".
 - **Responsible Persons (Strict Parsing)**: 
   - Interpret the text block hierarchically: Line 1 (Top)→name, Line 2→role, Lines 3+ (Bottom)→description.
+  - **Multiple persons on the same line (CRITICAL)**:
+    - Names of 2 or 3 persons are often written on a SINGLE line, separated by "/", "&", "and", or similar delimiters.
+    - Example: "Dr. John Smith / Prof. Maria Garcia & Dr. Hans Müller" → THREE separate persons, NOT one person.
+    - **Use the ROLES line to determine how many persons there are**: If the roles line below says "Director / Head of Laboratory / Quality Manager", that means there are 3 separate persons. Match each name to each role by position.
+    - **Separators**: Look for " / ", " & ", " and ", " AND " between full names. These indicate separate persons.
+    - **DO NOT split a person's first name from their surname/initial**: "Dr. John A. Smith" is ONE person. "M. Müller" is ONE person. Do NOT treat the period, initial, or space within a single name as a separator.
+    - **Matching rule**: Split the name line and role line by the SAME separator pattern. The number of names MUST match the number of roles. If they match, pair them positionally (1st name↔1st role, 2nd name↔2nd role, etc.).
+    - Each extracted person must be a SEPARATE entry in the responsiblePersons array with their own name and role.
   - **Coordinates**: If multiple persons are signed side-by-side, you MUST extract distinct, SEPARATE 'sectionCoordinates' bounding boxes for EACH individual person. Do not draw one massive box covering all of them.
 - **Validity**: "valid for X months"→Time After Dispatch (durationM). "valid until [Date]"→Specific Time. "valid until revoked"→Until Revoked.
   - ALL dates MUST be YYYY-MM-DD. MM/YYYY→last day of month (e.g. "05/2048"→"2048-05-31").
@@ -47,6 +70,13 @@ You are an expert in Reference Material documents (both Certificates and Product
   - Quantity name (Row name): If a table lists multiple distinct MATERIALS as rows, after splitting them into separate results, the Quantity 'name' should describe the property being measured, NOT just the material name.
 - **Footnotes**: Capture footnotes (1), 2), *) below a table into that MeasurementResult's 'description', NOT the Property description. If a footnote pointer references another page, go there and extract actual text with coordinates.
 - **Column mapping**: Values like "< 2" or "> 100"→put in 'value', leave 'uncertainty' empty.
+- **USED METHODS / PROCEDURES COLUMN (CRITICAL)**:
+  - Some tables have a "USED METHODS", "Method", or "Procedures" column that specifies the analytical method used for each row/quantity.
+  - If such a column exists, extract the full method text for each quantity row into the quantity's 'method' field.
+  - Example: A row "PROTEIN CONTENT" with method "NF EN ISO 20483: Cereals and pulses - Determination of the nitrogen content..." → set method="NF EN ISO 20483: Cereals and pulses - Determination of the nitrogen content..." on that quantity.
+  - Each quantity row may have a DIFFERENT method. Extract the exact method text per row.
+  - If no methods column exists in the table, leave the 'method' field empty.
+  - Do NOT put the method text into the property-level 'procedures' field — put it on each individual quantity.
 - **Element names — Superscripts & Isotopes (CRITICAL RULES)**:
   - **Isotopes & Math (PRESERVE EXACTLY)**: Isotope mass numbers BEFORE or WITHIN the symbol (e.g., ¹⁴C, ²³⁹Pu, δ¹³C, ⁹⁰Sr) or math notation (log₁₀) MUST BE PRESERVED EXACTLY AS UNICODE SUPERSCRIPTS/SUBSCRIPTS. Do NOT convert ¹⁴C to 14C! Keep it as ¹⁴C. Do NOT convert δ¹³C to δ13C! Keep it as δ¹³C.
   - **Footnotes (STRIP & APPLY)**: Footnote markers AFTER the symbol (e.g., Cu¹, Fe²⁾, Zn *, Pb a)) are just references.
@@ -292,6 +322,7 @@ const RESPONSE_SCHEMA = {
                                             coverageFactor: { type: Type.STRING },
                                             coverageProbability: { type: Type.STRING },
                                             distribution: { type: Type.STRING },
+                                            method: { type: Type.STRING, description: "If the table has a USED METHODS or Method column, extract the full method text for this specific quantity row." },
                                             fieldCoordinates: QuantityCoordSchema
                                         }
                                     }
