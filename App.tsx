@@ -904,7 +904,21 @@ const App: React.FC = () => {
                   };
               });
               let finalMaterialRef = newMats.length === 1 ? newMats[0].uuid : undefined;
-              if (newMats.length > 1 && r.linkedMaterialName) {
+
+              // Priority 1: Match by linkedBatchLot → find material whose identifiers contain this batch/lot value
+              if (r.linkedBatchLot && r.linkedBatchLot.trim()) {
+                  const batchVal = r.linkedBatchLot.trim().toLowerCase();
+                  const batchMat = newMats.find((m: any) =>
+                      (m.materialIdentifiers || []).some((id: any) =>
+                          (id.scheme === 'Lot' || id.scheme === 'Batch' || id.scheme === 'lot' || id.scheme === 'batch') &&
+                          id.value && id.value.trim().toLowerCase() === batchVal
+                      )
+                  );
+                  if (batchMat) finalMaterialRef = batchMat.uuid;
+              }
+
+              // Priority 2: Match by linkedMaterialName (existing logic)
+              if (!finalMaterialRef && newMats.length > 1 && r.linkedMaterialName) {
                   const matchedMat = newMats.find((m: any) => 
                       m.name.toLowerCase() === r.linkedMaterialName.toLowerCase() || 
                       m.name.includes(r.linkedMaterialName) || 

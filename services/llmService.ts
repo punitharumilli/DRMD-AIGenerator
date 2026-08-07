@@ -53,6 +53,13 @@ Many certificates contain content in multiple languages (e.g., Portuguese and En
 **MATERIALS**: Extract name, description, minimum sample size, item quantities.
 - Material name is often the document's prominent title. Extract distinct fieldCoordinates for 'name'.
 - **Identifier**: Split RM code into scheme+value (e.g. "BAM-M386a"→scheme:"BAM", value:"M386a"). No prefix→use "MaterialID".
+- **Lot / Batch Numbers (CRITICAL)**:
+  - Look for "Lot", "Lot No.", "Lote", "Batch", "Batch No.", "Batch no", "Charge", or similar labels in the certificate.
+  - Extract ALL lot/batch numbers found and add each as a materialIdentifier with scheme="Lot" or scheme="Batch" and value=the number/code.
+  - There may be 1, 2, 3 or more lot/batch numbers — include ALL of them.
+  - Example: "Lot No.: CRM0011-01-A" → materialIdentifier {scheme: "Batch", value: "CRM0011-01-A"}.
+  - Example: Certificate with "Batch 1: ABC-001" and "Batch 2: ABC-002" → TWO materialIdentifiers.
+  - If properties/tables reference specific lots or batches, set `linkedBatchLot` on the corresponding MeasurementResult to the lot/batch value.
 - **minimumSampleSize vs itemQuantities — CRITICAL DISTINCTION**:
   - **minimumSampleSize**: The minimum amount of the reference material needed to perform a valid calibration or test (e.g. "minimum sample intake: 4.9 g", "use at least 100 mg"). This is an instruction for the user.
   - **itemQuantities**: The total amount of reference material shipped by the producer to the customer (e.g. "50 g per bottle", "10 mL ampoule", "set of 5 capsules"). This describes the packaging/delivery.
@@ -89,9 +96,18 @@ Many certificates contain content in multiple languages (e.g., Portuguese and En
 - **Uncertainty & Coverage (CRITICAL)**: Look for "k=2"/"coverage factor k=2" and "95% confidence" in captions/footnotes. Extract to coverageFactor and coverageProbability. If probability given as percentage (e.g. 95%), store as decimal (0.95).
   - **CRITICAL APPLICABILITY RULE**: The k-factor and coverage probability ONLY apply to rows/quantities that ACTUALLY HAVE an extracted 'uncertainty' numerical value. If a row's uncertainty is empty (e.g., it is a limit like "< 100", or just blank), you MUST NOT assign a coverageFactor or coverageProbability to that specific quantity row, regardless of what the column header footnote says. You cannot apply a confidence interval to an empty cell!
   - **Reasoning**: You MUST provide a 'coverageReasoning' at the MeasurementResult level explaining WHICH properties the k-factor/probability were assigned to, WHY they were assigned, and WHY they were NOT assigned to other properties (e.g., "The footnote 2) defines k=2 for the uncertainty column. Phosphorus has an uncertainty of 2.2, so k=2 is applied. Si, Ti, and V have blank uncertainties, so k=2 is NOT applied to them."). This reasoning will be displayed to the user.
-**STATEMENTS**: Extract full text and fieldCoordinates for: Intended Use, Commutability, Storage Information, Handling Instructions, Metrological Traceability, Health & Safety, Subcontractors, Legal Notice, Reference to Certification Report.
+**STATEMENTS (CRITICAL — EXTRACT THOROUGHLY)**:
+Extract full text and fieldCoordinates for each statement type. Read the ENTIRE certificate carefully — statements may appear under many different section headings. Do NOT leave a statement empty if the information exists anywhere in the certificate.
+- **FORMATTING (CRITICAL)**: When the PDF presents information as bullet points, numbered steps, dashes, or separate paragraphs, you MUST preserve that structure using newline characters (\\n) in the extracted text. Do NOT merge points into a single continuous paragraph. Example: If the PDF shows "1. Dry at 105°C\\n2. Cool in desiccator\\n3. Weigh 0.5g", keep it as "1. Dry at 105°C\\n2. Cool in desiccator\\n3. Weigh 0.5g". This applies to ALL statement fields AND the property-level 'procedures' field.
+- **Intended Use**: Look for "Intended Use", "Purpose", "Application", "Scope", "Use of the Material", "Field of Application". Extract the full text describing what the material is intended for.
+- **Commutability**: Look for "Commutability", "Matrix Effects", "Method Dependence". May not exist in every certificate.
+- **Storage Information**: Look for "Storage", "Storage Conditions", "Storage Instructions", "Shelf Life", "Expiry", "Stability". Extract ALL text about how and where to store the material (temperature, light, humidity, container, etc.).
+- **Handling Instructions**: Look for "Handling", "Instructions for Use", "Use Instructions", "Preparation", "Sample Preparation", "Reconstitution", "Drying", "Minimum Sample Size", "How to Use". Extract ALL text about how to handle, prepare, open, or use the material. Note: Storage and Handling may be in the SAME section — split the content appropriately. If a section covers both, extract the storage-related sentences into storageInformation and the usage/handling sentences into handlingInstructions.
+- **Metrological Traceability**: Look for "Traceability", "Metrological Traceability", "Traceability Statement", "SI Traceability", "Reference Standards", "Calibration". Extract the full traceability chain description.
+- **Health & Safety**: Look for "Safety", "Health", "Hazard", "MSDS", "SDS", "Material Safety Data Sheet", "Warning", "Precautions", "Toxicity", "Dangerous". Extract safety warnings and precautions.
 - **Subcontractors**: Look for sections titled "Origin and preparation of the material", "Participating Laboratories", "Collaborating Laboratories", "Analyses Performed By" or "Subcontractors". Extract the FULL context of their involvement. Include the specific material name they worked on, the specific contractor company/institute name, their location/place, and details of what tasks they performed (e.g. prepared, homogenized, supplied). Do NOT just list names.
-- **Certification Report**: Coordinates must be distinct from and BELOW Subcontractors section. If text contains pointer to other pages ("*Notes and references are on pages X"), go to those pages and extract actual content, not the pointer.
+- **Legal Notice**: Look for "Legal Notice", "Disclaimer", "Liability", "Warranty", "Legal Information", "Terms". Extract the full legal text.
+- **Reference to Certification Report**: ONLY extract if the certificate provides a specific access link (URL), document reference number, or explicit pointer to where the full certification report can be found or downloaded (e.g. "The certification report is available at https://...", "See report BAM-xyz", "available on our website at..."). If no such link or pointer exists in the certificate, leave this field EMPTY — do NOT fill it with general descriptions or other content.
 
 **ORIGINAL TEXT TRACKING**: For ANY transformed/normalized/inferred value, populate 'originalTexts' as JSON-encoded string: '{"fieldName":"verbatim PDF text"}'.
 Examples: Date "31 December 2024"→specificTime="2024-12-31", originalTexts='{"specificTime":"31 December 2024"}'. Country inference "Vienna, Austria"→countryCode="AT", originalTexts='{"countryCode":"Austria"}'.
@@ -305,6 +321,7 @@ const RESPONSE_SCHEMA = {
                             properties: {
                                 name: { type: Type.STRING },
                                 linkedMaterialName: { type: Type.STRING, description: "If the certificate contains multiple materials, explicitly link this table to the exact material name it corresponds to." },
+                                linkedBatchLot: { type: Type.STRING, description: "If this table/result is specific to a particular lot or batch, set this to the exact lot/batch number value (e.g. 'CRM0011-01-A')." },
                                 description: { type: Type.STRING },
                                 coverageReasoning: { type: Type.STRING, description: "Explain why k-factor and probability were assigned to certain properties and not others." },
                                 sectionCoordinates: BoxSchema,
