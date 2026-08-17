@@ -754,7 +754,7 @@ const App: React.FC = () => {
   };
 
   // Shared mapping function: converts LLM extracted data into a full DRMD object
-  const mapExtractedToDrmd = (extractedData: Partial<DRMD>, fileName: string, base64Content: string): DRMD => {
+  const mapExtractedToDrmd = async (extractedData: Partial<DRMD>, fileName: string, base64Content: string): Promise<DRMD> => {
       // Pre-processing: validity normalization
       if (extractedData?.administrativeData && extractedData.administrativeData.validityType === "Time After Dispatch") {
           const rawY = extractedData.administrativeData.durationY || 0;
@@ -1253,7 +1253,7 @@ const App: React.FC = () => {
           try {
               setStatusMessage("Analyzing PDF structure and coordinates with Gemini Vision...");
               const extractedData = await extractStructuredDataFromPdf(base64Content, file.type || 'application/pdf', geminiApiKey, modelTemperature);
-              const mapped = mapExtractedToDrmd(extractedData, file.name, base64Content);
+              const mapped = await mapExtractedToDrmd(extractedData, file.name, base64Content);
               setDrmdData(mapped);
               setActiveTab("admin");
             } catch (err) {
@@ -1356,7 +1356,7 @@ const App: React.FC = () => {
           try {
               const base64Content = await readFileAsBase64(file);
               const extractedData = await extractStructuredDataFromPdf(base64Content, file.type || 'application/pdf', geminiApiKey, modelTemperature);
-              const mapped = mapExtractedToDrmd(extractedData, file.name, base64Content);
+              const mapped = await mapExtractedToDrmd(extractedData, file.name, base64Content);
               const xmlContent = generateDrmdXml(mapped);
               const { rmCode, rmName } = extractRmInfo(mapped);
 
