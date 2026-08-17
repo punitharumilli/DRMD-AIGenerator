@@ -485,23 +485,6 @@ export const decideRorId = async (
     if (!candidates || candidates.length === 0) return "";
     
     const ai = new GoogleGenAI({ apiKey: apiKey });
-    const model = ai.getGenerativeModel({
-        model: 'gemini-2.5-flash',
-        generationConfig: {
-            temperature: 0,
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                    rorId: { 
-                        type: Type.STRING,
-                        description: "The official bare ROR ID (e.g. '03x516a66') of the matched organization. If none of the candidates match, return an empty string."
-                    }
-                },
-                required: ["rorId"]
-            }
-        }
-    });
 
     const prompt = `You are an expert at assigning Research Organization Registry (ROR) IDs to organizations. 
 You are given the extracted information for a Reference Material Producer and a list of potential candidate organizations returned by the ROR API.
@@ -521,16 +504,34 @@ If you find a strong match, extract its ID (the part after 'https://ror.org/') a
 If none of the candidates are a strong match for this specific producer, return an empty string for the rorId.`;
 
     try {
-        const response = await model.generateContent(prompt);
-        const text = response.response.text();
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            const data = JSON.parse(jsonMatch[0]);
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        rorId: { 
+                            type: Type.STRING,
+                            description: "The official bare ROR ID (e.g. '03x516a66') of the matched organization. If none of the candidates match, return an empty string."
+                        }
+                    },
+                    required: ["rorId"]
+                },
+                temperature: 0
+            }
+        });
+
+        const text = response.text;
+        if (text) {
+            const cleaned = text.replace(/^```json/i, '').replace(/```$/i, '').trim();
+            const data = JSON.parse(cleaned);
             return data.rorId || "";
         }
         return "";
     } catch (e) {
-        console.error("Error in decideRorId LLM call", e);
+        console.error("Error in decideRorId LLM call:", e);
         return "";
     }
 };
