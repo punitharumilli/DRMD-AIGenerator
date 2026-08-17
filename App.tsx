@@ -664,7 +664,7 @@ const App: React.FC = () => {
   const [bulkResults, setBulkResults] = useState<BulkResult[]>([]);
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0, currentFile: '' });
-  const [rorSuggestions, setRorSuggestions] = useState<Record<number, RorMatch[]>>({});
+
 
   // Load ROR data on mount
   useEffect(() => { loadRorData(); }, []);
@@ -1697,8 +1697,7 @@ const App: React.FC = () => {
 
                              {/* ROR ID Section */}
                              <div className="border-t border-gray-200 pt-3 mt-2 space-y-2">
-                                 <div className="flex justify-between items-center">
-                                     <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider">Organization Identifiers (ROR)</label>
+                                 <div className="flex justify-end items-center">
                                      <button onClick={() => {
                                          const list = [...drmdData.administrativeData.producers];
                                          list[idx].organizationIdentifiers = [...(list[idx].organizationIdentifiers || []), { scheme: 'ROR', value: '', link: '' }];
@@ -1730,15 +1729,6 @@ const App: React.FC = () => {
                                                  />
                                              </div>
                                          </div>
-                                         <div className="flex-[2]">
-                                             <div className="text-[10px] font-bold text-gray-400 uppercase">Matched Organization</div>
-                                             <div className="bg-gray-100 border border-gray-200 text-xs px-2 py-1.5 rounded text-gray-600 min-h-[30px] flex items-center">
-                                                 {orgId.value ? (() => {
-                                                     const matches = lookupRor(orgId.value, 1, 0.9);
-                                                     return matches.length > 0 ? matches[0].display : (orgId.link ? `ROR: ${orgId.value}` : 'No match in ROR database');
-                                                 })() : 'Enter ROR ID or click "Lookup from Name"'}
-                                             </div>
-                                         </div>
                                          {(prod.organizationIdentifiers || []).length > 1 && (
                                              <button onClick={() => {
                                                  const list = [...drmdData.administrativeData.producers];
@@ -1748,48 +1738,6 @@ const App: React.FC = () => {
                                          )}
                                      </div>
                                  ))}
-                                 {prod.name && prod.name.trim() && (
-                                     <button
-                                         onClick={() => {
-                                             const matches = lookupRor(prod.name, 5, 0.4);
-                                             if (matches.length > 0) {
-                                                 setRorSuggestions(prev => ({...prev, [idx]: matches}));
-                                             } else {
-                                                 setRorSuggestions(prev => ({...prev, [idx]: []}));
-                                             }
-                                         }}
-                                         className="text-xs bg-green-50 text-green-700 px-2 py-1 rounded hover:bg-green-100 font-medium border border-green-200"
-                                     >🔍 Lookup ROR from Name: "{prod.name.length > 40 ? prod.name.substring(0, 40) + '...' : prod.name}"</button>
-                                 )}
-                                 {rorSuggestions[idx] && rorSuggestions[idx].length > 0 && (
-                                     <div className="bg-green-50 border border-green-200 rounded p-2 space-y-1">
-                                         <div className="text-[10px] font-bold text-green-600 uppercase">ROR Suggestions (click to apply)</div>
-                                         {rorSuggestions[idx].map((match, mIdx) => (
-                                             <button key={mIdx} onClick={() => {
-                                                 const list = [...drmdData.administrativeData.producers];
-                                                 // Set the first organization identifier to the selected match
-                                                 if (list[idx].organizationIdentifiers.length === 0 || (list[idx].organizationIdentifiers.length === 1 && !list[idx].organizationIdentifiers[0].value)) {
-                                                     list[idx].organizationIdentifiers = [{ scheme: 'ROR', value: match.id, link: match.link }];
-                                                 } else {
-                                                     list[idx].organizationIdentifiers.push({ scheme: 'ROR', value: match.id, link: match.link });
-                                                 }
-                                                 setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, producers: list}}));
-                                                 setRorSuggestions(prev => { const next = {...prev}; delete next[idx]; return next; });
-                                             }} className="block w-full text-left text-xs px-2 py-1.5 rounded hover:bg-green-100 transition">
-                                                 <span className="font-mono text-green-800">{match.id}</span>
-                                                 <span className="text-gray-600 ml-2">{match.display}</span>
-                                                 <span className="text-gray-400 ml-1">({Math.round(match.score * 100)}%)</span>
-                                             </button>
-                                         ))}
-                                         <button onClick={() => setRorSuggestions(prev => { const next = {...prev}; delete next[idx]; return next; })} className="text-[10px] text-gray-400 hover:text-gray-600">Dismiss</button>
-                                     </div>
-                                 )}
-                                 {rorSuggestions[idx] && rorSuggestions[idx].length === 0 && (
-                                     <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-                                         No ROR match found for "{prod.name}". You can enter the ROR ID manually.
-                                         <button onClick={() => setRorSuggestions(prev => { const next = {...prev}; delete next[idx]; return next; })} className="ml-2 text-gray-400 hover:text-gray-600">✕</button>
-                                     </div>
-                                 )}
                              </div>
                         </div>
                      </div>

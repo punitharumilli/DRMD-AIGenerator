@@ -60,26 +60,44 @@ const similarityScore = (queryNorm: string, candidateNorm: string): number => {
     // Exact match
     if (queryNorm === candidateNorm) return 1.0;
 
-    // Check if one contains the other
-    if (candidateNorm.includes(queryNorm) || queryNorm.includes(candidateNorm)) {
-        const ratio = Math.min(queryNorm.length, candidateNorm.length) / Math.max(queryNorm.length, candidateNorm.length);
-        return 0.7 + (0.25 * ratio); // 0.7–0.95 range
-    }
-
-    // Token-based matching
-    const queryTokens = queryNorm.split(' ').filter(t => t.length > 1);
-    const candidateTokens = candidateNorm.split(' ').filter(t => t.length > 1);
+    // Tokenize
+    const queryTokens = queryNorm.split(/[\s\-()]+/).filter(t => t.length > 0);
+    const candidateTokens = candidateNorm.split(/[\s\-()]+/).filter(t => t.length > 0);
     
     if (queryTokens.length === 0 || candidateTokens.length === 0) return 0;
 
+    // Check if candidate is exactly one of the query tokens (e.g. acronym match like "bam")
+    if (candidateTokens.length === 1 && queryTokens.includes(candidateTokens[0])) {
+        // If it's a perfect acronym match within the query, give it a high score
+        return 0.9;
+    }
+
+    // Check if candidate is a full substring of the query, but only if it's a significant length
+    // or matches on word boundaries
+    if (candidateNorm.length > 4 && (queryNorm.includes(candidateNorm) || candidateNorm.includes(queryNorm))) {
+        const ratio = Math.min(queryNorm.length, candidateNorm.length) / Math.max(queryNorm.length, candidateNorm.length);
+        return 0.7 + (0.2 * ratio); // 0.7–0.9 range
+    }
+
     let matchedTokens = 0;
     for (const qt of queryTokens) {
-        if (candidateTokens.some(ct => ct === qt || ct.includes(qt) || qt.includes(ct))) {
+        if (candidateTokens.some(ct => {
+            if (ct === qt) return true;
+            // Only allow substring matches for tokens of reasonable length
+            if (ct.length > 3 && qt.length > 3) {
+                return ct.includes(qt) || qt.includes(ct);
+            }
+            return false;
+        })) {
             matchedTokens++;
         }
     }
 
-    return matchedTokens / Math.max(queryTokens.length, candidateTokens.length);
+    // Calculate Jaccard-like similarity
+    const score = matchedTokens / Math.max(queryTokens.length, candidateTokens.length);
+    
+    // Penalize if the match is too small
+    return score > 0 ? score * 0.9 : 0;
 };
 
 export interface RorMatch {
