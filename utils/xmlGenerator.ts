@@ -240,11 +240,17 @@ export const generateDrmdXml = (data: DRMD): string => {
 <drmd:digitalReferenceMaterialDocument xmlns:dcc="https://ptb.de/dcc" xmlns:drmd="https://www.bam.de/drmd" xmlns:si="https://ptb.de/si" schemaVersion="0.3.0">`;
 
     // --- Administrative Data ---
+    let docUUID = data.administrativeData.uniqueIdentifier;
+    // If it doesn't look like a UUID, generate one for the XML
+    if (!docUUID || !docUUID.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+        docUUID = uuid();
+    }
+    
     let adminXml = `
   <drmd:administrativeData>
     <drmd:coreData>
       <drmd:titleOfTheDocument>${escapeXml(data.administrativeData.title)}</drmd:titleOfTheDocument>
-      <drmd:uniqueIdentifier>${escapeXml(data.administrativeData.uniqueIdentifier)}</drmd:uniqueIdentifier>
+      <drmd:uniqueIdentifier>${docUUID}</drmd:uniqueIdentifier>
       <drmd:validity>
 ${renderValidity(data.administrativeData)}
       </drmd:validity>
@@ -308,7 +314,8 @@ ${renderValidity(data.administrativeData)}
     let materialsXml = `
   <drmd:materials>`;
     (data.materials || []).forEach(mat => {
-        const matId = mat.xmlId || `mat_${sanitizeForId(mat.name)}`;
+        // Always use a random UUID for the material ID as requested
+        const matId = mat.uuid || uuid();
         materialsXml += `
     <drmd:material id="${escapeXml(matId)}">
       <drmd:name>
@@ -397,9 +404,9 @@ ${renderValidity(data.administrativeData)}
             const refSource = res.materialRef || prop.materialRef;
             if (refSource) {
                 const mat = (data.materials || []).find(m => m.uuid === refSource);
-                if (mat) resultRefId = mat.xmlId || `mat_${sanitizeForId(mat.name)}`;
+                if (mat) resultRefId = mat.uuid; // Use UUID for refId instead of xmlId
             } else if (data.materials.length === 1) {
-                resultRefId = data.materials[0].xmlId || `mat_${sanitizeForId(data.materials[0].name)}`;
+                resultRefId = data.materials[0].uuid; // Use UUID for refId
             }
             const resultRefIdAttr = resultRefId ? ` refId="${escapeXml(resultRefId)}"` : '';
 
@@ -408,10 +415,15 @@ ${renderValidity(data.administrativeData)}
           <drmd:name>
             <dcc:content>${escapeXml(res.name || "Values")}</dcc:content>
           </drmd:name>`;
-            if (res.description) {
+            let resDesc = res.description || "";
+            if (res.linkedBatchLot) {
+                resDesc += (resDesc ? " | " : "") + `Linked Batch/Lot: ${res.linkedBatchLot}`;
+            }
+            
+            if (resDesc) {
                 propertiesXml += `
           <drmd:description>
-            <dcc:content>${escapeXml(res.description)}</dcc:content>
+            <dcc:content>${escapeXml(resDesc)}</dcc:content>
           </drmd:description>`;
             }
             propertiesXml += `

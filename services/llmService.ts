@@ -33,6 +33,7 @@ Many certificates contain content in multiple languages (e.g., Portuguese and En
 **SECTION COORDINATES**: Extract bounding box of the ENTIRE section (all fields/labels/content) for each: Producer, Responsible Person block, Material block, MeasurementResult table.
 
 **ADMINISTRATIVE DATA**:
+- **uniqueIdentifier**: Extract the primary Reference Material Code or Certificate Number. Do NOT extract Lot or Batch numbers into this field. Lot and Batch numbers must ONLY go into the materials' 'materialIdentifiers' array.
 - **Producer**: Extract name, full address, email, phone, fax.
   - Phone: Look for "P:", "Phone:", "Tel:", or country codes (e.g. "+49"). Ensure extraction.
   - If city contains "Berlin" or "Adlershof", set countryCode="DE".
@@ -59,7 +60,7 @@ Many certificates contain content in multiple languages (e.g., Portuguese and En
   - There may be 1, 2, 3 or more lot/batch numbers — include ALL of them.
   - Example: "Lot No.: CRM0011-01-A" → materialIdentifier {scheme: "Batch", value: "CRM0011-01-A"}.
   - Example: Certificate with "Batch 1: ABC-001" and "Batch 2: ABC-002" → TWO materialIdentifiers.
-  - If properties/tables reference specific lots or batches, set `linkedBatchLot` on the corresponding MeasurementResult to the lot/batch value.
+  - If properties/tables reference specific lots or batches, set 'linkedBatchLot' on the corresponding MeasurementResult to the lot/batch value.
 - **minimumSampleSize vs itemQuantities — CRITICAL DISTINCTION**:
   - **minimumSampleSize**: The minimum amount of the reference material needed to perform a valid calibration or test (e.g. "minimum sample intake: 4.9 g", "use at least 100 mg"). This is an instruction for the user.
   - **itemQuantities**: The total amount of reference material shipped by the producer to the customer (e.g. "50 g per bottle", "10 mL ampoule", "set of 5 capsules"). This describes the packaging/delivery.
@@ -217,6 +218,7 @@ const RESPONSE_SCHEMA = {
         administrativeData: {
             type: Type.OBJECT,
             properties: {
+                uniqueIdentifier: { type: Type.STRING, description: "The primary RM Code or Certificate Number. Do NOT put Lot or Batch numbers here." },
                 title: { type: Type.STRING },
                 validityType: { type: Type.STRING, enum: ["Until Revoked", "Time After Dispatch", "Specific Time"] },
                 durationY: { type: Type.INTEGER },

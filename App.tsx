@@ -1578,7 +1578,7 @@ const App: React.FC = () => {
                 <Select label="Title of Document *" value={drmdData.administrativeData.title} options={ALLOWED_TITLES} onChange={(v) => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, title: v}}))} />
                 <div className="flex gap-2 items-end">
                     <div className="flex-1">
-                        <Input label="Unique Identifier *" value={drmdData.administrativeData.uniqueIdentifier} onChange={(v) => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, uniqueIdentifier: v}}))} onFocus={() => handleHighlight(drmdData.administrativeData.fieldCoordinates?.uniqueIdentifier, null, drmdData.administrativeData.uniqueIdentifier, drmdData.administrativeData.originalTexts?.uniqueIdentifier)} onInfoClick={() => handleHighlight(drmdData.administrativeData.fieldCoordinates?.uniqueIdentifier, null, drmdData.administrativeData.uniqueIdentifier, drmdData.administrativeData.originalTexts?.uniqueIdentifier)} />
+                        <Input label="Document UUID (XML ID) *" value={drmdData.administrativeData.uniqueIdentifier} onChange={(v) => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, uniqueIdentifier: v}}))} onFocus={() => handleHighlight(drmdData.administrativeData.fieldCoordinates?.uniqueIdentifier, null, drmdData.administrativeData.uniqueIdentifier, drmdData.administrativeData.originalTexts?.uniqueIdentifier)} onInfoClick={() => handleHighlight(drmdData.administrativeData.fieldCoordinates?.uniqueIdentifier, null, drmdData.administrativeData.uniqueIdentifier, drmdData.administrativeData.originalTexts?.uniqueIdentifier)} />
                     </div>
                     <button onClick={() => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, uniqueIdentifier: generateUUID()}}))} className="bg-gray-200 p-2 rounded mb-[2px] hover:bg-gray-300" title="Generate new UUID">🔄</button>
                 </div>
@@ -1738,36 +1738,37 @@ const App: React.FC = () => {
                         <Input label={drmdData.administrativeData.title === "referenceMaterialCertificate" ? "Name *" : "Name"} value={mat.name} onFocus={() => handleHighlight(mat.fieldCoordinates?.name, mat.sectionCoordinates, mat.name, mat.originalTexts?.name)} onChange={(v) => { const list = [...drmdData.materials]; list[idx].name = v; setDrmdData(p => ({...p, materials: list})); }} onInfoClick={() => handleHighlight(mat.fieldCoordinates?.name, mat.sectionCoordinates, mat.name, mat.originalTexts?.name)} />
                         <Input label="Assigned Material Identifier (XML ID)" value={mat.xmlId || ""} onChange={(v) => { const list = [...drmdData.materials]; list[idx].xmlId = v; setDrmdData(p => ({...p, materials: list})); }} />
                         
-                        {mat.materialIdentifiers.map((mid, midIdx) => {
-                             const hasScheme = mid.scheme && mid.scheme !== "MaterialID" && mid.scheme.trim() !== "";
-                             const compositeValue = hasScheme ? `${mid.scheme}-${mid.value}` : mid.value;
-                             return (
-                                 <Input 
-                                     key={midIdx}
-                                     label="RM Code (e.g. BAM-M386a)" 
-                                     value={compositeValue}
-                                     onFocus={() => handleHighlight(mat.fieldCoordinates?.materialIdentifiers, mat.sectionCoordinates, compositeValue.trim())}
-                                     onChange={(val) => {
-                                         const list = [...drmdData.materials];
-                                         let scheme = "";
-                                         let value = val;
-                                         const hyphenIdx = val.indexOf('-');
-                                         const spaceIdx = val.indexOf(' ');
-                                         if (hyphenIdx !== -1) {
-                                             scheme = val.substring(0, hyphenIdx).trim();
-                                             value = val.substring(hyphenIdx + 1).trim();
-                                         } else if (spaceIdx !== -1) {
-                                             scheme = val.substring(0, spaceIdx).trim();
-                                             value = val.substring(spaceIdx + 1).trim();
-                                         }
-                                         list[idx].materialIdentifiers[midIdx].scheme = scheme;
-                                         list[idx].materialIdentifiers[midIdx].value = value;
-                                         setDrmdData(p => ({...p, materials: list}));
-                                     }}
-                                     onInfoClick={() => handleHighlight(mat.fieldCoordinates?.materialIdentifiers, mat.sectionCoordinates, compositeValue.trim())}
-                                 />
-                             );
-                        })}
+                        <div className="space-y-2 mt-3">
+                            <div className="flex justify-between items-center">
+                                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider">Material Identifiers</label>
+                                <button onClick={() => { const list = [...drmdData.materials]; list[idx].materialIdentifiers.push({scheme: 'Batch', value: ''}); setDrmdData(p => ({...p, materials: list})); }} className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded hover:bg-gray-200">+ Add</button>
+                            </div>
+                            {mat.materialIdentifiers.map((mid, midIdx) => (
+                                <div key={midIdx} className="flex gap-2 items-center">
+                                    <select
+                                        value={mid.scheme || "MaterialID"}
+                                        onChange={(e) => { const list = [...drmdData.materials]; list[idx].materialIdentifiers[midIdx].scheme = e.target.value; setDrmdData(p => ({...p, materials: list})); }}
+                                        className="bg-gray-50 border border-gray-200 text-sm px-2 py-2 rounded outline-none w-1/3 text-gray-700"
+                                    >
+                                        <option value="Batch">Batch</option>
+                                        <option value="Lot">Lot</option>
+                                        <option value="catalogNumber">RM Code</option>
+                                        <option value="MaterialID">MaterialID</option>
+                                        <option value="CAS">CAS</option>
+                                    </select>
+                                    <div className="flex-1">
+                                        <input
+                                            type="text"
+                                            value={mid.value}
+                                            onChange={(e) => { const list = [...drmdData.materials]; list[idx].materialIdentifiers[midIdx].value = e.target.value; setDrmdData(p => ({...p, materials: list})); }}
+                                            className="bg-white border border-gray-200 text-sm px-2 py-2 rounded outline-none w-full shadow-sm"
+                                            placeholder="Value..."
+                                        />
+                                    </div>
+                                    <button onClick={() => { const list = [...drmdData.materials]; list[idx].materialIdentifiers.splice(midIdx, 1); setDrmdData(p => ({...p, materials: list})); }} className="text-red-400 hover:text-red-600">🗑️</button>
+                                </div>
+                            ))}
+                        </div>
 
                         <Input label="Material Class" value={mat.materialClass} onFocus={() => handleHighlight(mat.fieldCoordinates?.materialClass, mat.sectionCoordinates, mat.materialClass, mat.originalTexts?.materialClass)} onChange={(v) => { const list = [...drmdData.materials]; list[idx].materialClass = v; setDrmdData(p => ({...p, materials: list})); }} onInfoClick={() => handleHighlight(mat.fieldCoordinates?.materialClass, mat.sectionCoordinates, mat.materialClass, mat.originalTexts?.materialClass)} />
                         
@@ -1856,18 +1857,33 @@ const App: React.FC = () => {
                                     <div className="flex gap-4 mb-4 items-start">
                                         <div className="flex-1 space-y-3">
                                             <Input label="Table Name" value={res.name} onFocus={() => handleHighlight(res.sectionCoordinates, null, res.name)} onChange={(v) => { const list = [...drmdData.properties]; list[pIdx].results[rIdx].name = v; setDrmdData(p => ({...p, properties: list})); }} onInfoClick={() => handleHighlight(res.sectionCoordinates, null, res.name)} />
-                                            <div>
-                                                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Linked Material Identifier</label>
-                                                <select 
-                                                    value={res.materialRef || ""} 
-                                                    onChange={(e) => { const list = [...drmdData.properties]; list[pIdx].results[rIdx].materialRef = e.target.value; setDrmdData(p => ({...p, properties: list})); }}
-                                                    className="bg-white border border-gray-200 text-sm px-2 py-1.5 rounded outline-none w-full shadow-sm text-gray-700"
-                                                >
-                                                    <option value="">None (Applies to all or N/A)</option>
-                                                    {drmdData.materials.map(m => (
-                                                        <option key={m.uuid} value={m.uuid}>{m.xmlId || m.name || "Unnamed Material"}</option>
-                                                    ))}
-                                                </select>
+                                            <div className="flex gap-2">
+                                                <div className="flex-1">
+                                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Linked Material</label>
+                                                    <select 
+                                                        value={res.materialRef || ""} 
+                                                        onChange={(e) => { const list = [...drmdData.properties]; list[pIdx].results[rIdx].materialRef = e.target.value; setDrmdData(p => ({...p, properties: list})); }}
+                                                        className="bg-white border border-gray-200 text-sm px-2 py-1.5 rounded outline-none w-full shadow-sm text-gray-700"
+                                                    >
+                                                        <option value="">None (Applies to all or N/A)</option>
+                                                        {drmdData.materials.map(m => (
+                                                            <option key={m.uuid} value={m.uuid}>{m.xmlId || m.name || "Unnamed Material"}</option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+                                                <div className="flex-1">
+                                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Linked Batch/Lot</label>
+                                                    <select 
+                                                        value={res.linkedBatchLot || ""} 
+                                                        onChange={(e) => { const list = [...drmdData.properties]; list[pIdx].results[rIdx].linkedBatchLot = e.target.value; setDrmdData(p => ({...p, properties: list})); }}
+                                                        className="bg-white border border-gray-200 text-sm px-2 py-1.5 rounded outline-none w-full shadow-sm text-gray-700"
+                                                    >
+                                                        <option value="">None</option>
+                                                        {drmdData.materials.flatMap(m => m.materialIdentifiers.filter(mid => mid.scheme === 'Batch' || mid.scheme === 'Lot' || mid.scheme === 'catalogNumber').map((mid, i) => (
+                                                            <option key={`${m.uuid}-${i}`} value={mid.value}>{mid.scheme}: {mid.value}</option>
+                                                        )))}
+                                                    </select>
+                                                </div>
                                             </div>
                                         </div>
                                         <div className="flex-[2]">

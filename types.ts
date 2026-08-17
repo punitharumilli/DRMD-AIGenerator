@@ -90,6 +90,7 @@ export interface MeasurementResult extends HasCoordinates {
     coverageReasoning?: string; // AI's reasoning for why kFactor/probability were assigned
     quantities: Quantity[];
     materialRef?: string; // Links this specific result table to a Material UUID
+    linkedBatchLot?: string; // Links this specific result table to a specific Lot or Batch value
 }
 
 export interface MaterialProperty {
