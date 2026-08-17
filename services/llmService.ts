@@ -231,6 +231,10 @@ const RESPONSE_SCHEMA = {
                         type: Type.OBJECT,
                         properties: {
                             name: { type: Type.STRING },
+                            rorId: { 
+                                type: Type.STRING,
+                                description: "The bare ROR ID (e.g. '03x516a66') for this producer organization. If you know the organization's ROR ID based on its name, please provide it here. Guess if necessary."
+                            },
                             email: { type: Type.STRING },
                             phone: { type: Type.STRING },
                             fax: { type: Type.STRING },

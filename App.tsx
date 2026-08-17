@@ -8,7 +8,7 @@ import { convertToDSI, getDsiPreview } from './utils/unitConverter';
 import { parseDrmdXml } from './utils/xmlParser';
 import { validateDrmd } from './utils/validator';
 import { getCasNumber } from './utils/casMapping';
-import { loadRorData, lookupRor, RorMatch } from './utils/rorLookup';
+
 
 // Helper for UUIDs
 const generateUUID = () => {
@@ -666,9 +666,6 @@ const App: React.FC = () => {
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0, currentFile: '' });
 
 
-  // Load ROR data on mount
-  useEffect(() => { loadRorData(); }, []);
-
   useEffect(() => {
       if (toastMessage) {
           const timer = setTimeout(() => setToastMessage(null), 15000);
@@ -1085,13 +1082,8 @@ const App: React.FC = () => {
               phone: p.phone || "",
               fax: p.fax || "",
               organizationIdentifiers: (() => {
-                  // Auto-lookup ROR from producer name
-                  const prodName = p.name || "";
-                  if (prodName) {
-                      const matches = lookupRor(prodName, 1, 0.6);
-                      if (matches.length > 0) {
-                          return [{ scheme: 'ROR', value: matches[0].id, link: matches[0].link }];
-                      }
+                  if (p.rorId) {
+                      return [{ scheme: 'ROR', value: p.rorId, link: `https://ror.org/${p.rorId}` }];
                   }
                   return [{...INITIAL_ID}];
               })(),
