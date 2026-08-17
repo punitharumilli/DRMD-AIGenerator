@@ -1078,18 +1078,40 @@ const App: React.FC = () => {
           let rorIdMatch = '';
           if (p.name) {
               try {
-                  const affiliationStr = [p.name, city, countryCode].filter(Boolean).join(", ");
-                  const queryUrl = `https://api.ror.org/organizations?affiliation=${encodeURIComponent(affiliationStr)}`;
-                  const res = await fetch(queryUrl);
-                  if (res.ok) {
-                      const data = await res.json();
-                      if (data && data.items && data.items.length > 0) {
-                          // Pass up to 5 top candidates to the LLM for evaluation
-                          const topCandidates = data.items.slice(0, 5).map((item: any) => item.organization).filter(Boolean);
-                          if (topCandidates.length > 0) {
-                              rorIdMatch = await decideRorId(p.name, city, countryCode, topCandidates, geminiApiKey);
+                  // Escape Elasticsearch reserved characters in the name
+                  const escapeName = (s: string) => s.replace(/[+\-=&|!(){}[\]^"~*?:\\/]/g, (c) => `\\${c}`);
+                  const safeName = escapeName(p.name);
+                  const countryFilter = countryCode ? `&filter=country.country_code:${countryCode}` : '';
+                  
+                  // Strategy: two queries to maximize coverage
+                  // 1. Unquoted query (broader, word-based matching) with country filter
+                  const url1 = `https://api.ror.org/organizations?query=${encodeURIComponent(safeName)}${countryFilter}`;
+                  // 2. Quoted query (exact phrase matching) with country filter
+                  const url2 = `https://api.ror.org/organizations?query=${encodeURIComponent(`"${safeName}"`)}${countryFilter}`;
+                  
+                  const [res1, res2] = await Promise.all([fetch(url1), fetch(url2)]);
+                  
+                  // Collect candidates from both queries, deduplicated by ID
+                  const seenIds = new Set<string>();
+                  const allCandidates: any[] = [];
+                  
+                  for (const res of [res1, res2]) {
+                      if (res.ok) {
+                          const data = await res.json();
+                          if (data && data.items) {
+                              for (const item of data.items.slice(0, 10)) {
+                                  if (item.id && !seenIds.has(item.id)) {
+                                      seenIds.add(item.id);
+                                      allCandidates.push(item);
+                                  }
+                              }
                           }
                       }
+                  }
+                  
+                  if (allCandidates.length > 0) {
+                      // Pass up to 10 unique candidates to the AI for evaluation
+                      rorIdMatch = await decideRorId(p.name, city, countryCode, allCandidates.slice(0, 10), geminiApiKey);
                   }
               } catch (e) {
                   console.error("ROR API / LLM decision error:", e);
