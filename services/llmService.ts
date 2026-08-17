@@ -475,3 +475,62 @@ export const extractStructuredDataFromPdf = async (base64File: string, mimeType:
     }
     throw lastError;
 };
+export const decideRorId = async (
+    producerName: string,
+    city: string,
+    countryCode: string,
+    candidates: any[],
+    apiKey: string
+): Promise<string> => {
+    if (!candidates || candidates.length === 0) return "";
+    
+    const ai = new GoogleGenAI({ apiKey: apiKey });
+    const model = ai.getGenerativeModel({
+        model: 'gemini-2.5-flash',
+        generationConfig: {
+            temperature: 0,
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                    rorId: { 
+                        type: Type.STRING,
+                        description: "The official bare ROR ID (e.g. '03x516a66') of the matched organization. If none of the candidates match, return an empty string."
+                    }
+                },
+                required: ["rorId"]
+            }
+        }
+    });
+
+    const prompt = `You are an expert at assigning Research Organization Registry (ROR) IDs to organizations. 
+You are given the extracted information for a Reference Material Producer and a list of potential candidate organizations returned by the ROR API.
+
+Extracted Producer Information:
+- Name: ${producerName}
+- City: ${city || "Not provided"}
+- Country Code: ${countryCode || "Not provided"}
+
+ROR API Candidates:
+${JSON.stringify(candidates, null, 2)}
+
+Task:
+Analyze the candidates and determine if one of them represents the extracted producer.
+Consider the name variations (acronyms, aliases, labels) and the location (city, country code, country_subdivision_name) of the candidates.
+If you find a strong match, extract its ID (the part after 'https://ror.org/') and return it.
+If none of the candidates are a strong match for this specific producer, return an empty string for the rorId.`;
+
+    try {
+        const response = await model.generateContent(prompt);
+        const text = response.response.text();
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const data = JSON.parse(jsonMatch[0]);
+            return data.rorId || "";
+        }
+        return "";
+    } catch (e) {
+        console.error("Error in decideRorId LLM call", e);
+        return "";
+    }
+};
