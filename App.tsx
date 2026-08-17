@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { 
     DRMD, INITIAL_DRMD, INITIAL_PRODUCER, INITIAL_PERSON, INITIAL_ID, INITIAL_QUANTITY, ALLOWED_TITLES, BulkResult
 } from './types';
-import { extractStructuredDataFromPdf } from './services/llmService';
+import { extractStructuredDataFromPdf, decideRorId } from './services/llmService';
 import { generateDrmdXml } from './utils/xmlGenerator';
 import { convertToDSI, getDsiPreview } from './utils/unitConverter';
 import { parseDrmdXml } from './utils/xmlParser';
@@ -1078,17 +1078,21 @@ const App: React.FC = () => {
           let rorIdMatch = '';
           if (p.name) {
               try {
-                  const query = encodeURIComponent(p.name);
-                  const filter = countryCode ? `&filter=country.country_code:${countryCode}` : '';
-                  const res = await fetch(`https://api.ror.org/organizations?query=${query}${filter}`);
+                  const affiliationStr = [p.name, city, countryCode].filter(Boolean).join(", ");
+                  const queryUrl = `https://api.ror.org/organizations?affiliation=${encodeURIComponent(affiliationStr)}`;
+                  const res = await fetch(queryUrl);
                   if (res.ok) {
                       const data = await res.json();
                       if (data && data.items && data.items.length > 0) {
-                          rorIdMatch = data.items[0].id.replace('https://ror.org/', '');
+                          // Pass up to 5 top candidates to the LLM for evaluation
+                          const topCandidates = data.items.slice(0, 5).map((item: any) => item.organization).filter(Boolean);
+                          if (topCandidates.length > 0) {
+                              rorIdMatch = await decideRorId(p.name, city, countryCode, topCandidates, geminiApiKey);
+                          }
                       }
                   }
               } catch (e) {
-                  console.error("ROR API error:", e);
+                  console.error("ROR API / LLM decision error:", e);
               }
           }
 
