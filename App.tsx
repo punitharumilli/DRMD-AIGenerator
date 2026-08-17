@@ -1068,12 +1068,30 @@ const App: React.FC = () => {
       });
 
 
-      const newProds = (extractedData?.administrativeData?.producers || []).map((p: any) => {
+      const newProds = await Promise.all((extractedData?.administrativeData?.producers || []).map(async (p: any) => {
           let countryCode = p.address?.countryCode || "";
           const city = p.address?.city || "";
           if (city.toLowerCase().includes("berlin") || city.toLowerCase().includes("adlershof")) {
               countryCode = "DE";
           }
+
+          let rorIdMatch = '';
+          if (p.name) {
+              try {
+                  const query = encodeURIComponent(p.name);
+                  const filter = countryCode ? `&filter=country.country_code:${countryCode}` : '';
+                  const res = await fetch(`https://api.ror.org/organizations?query=${query}${filter}`);
+                  if (res.ok) {
+                      const data = await res.json();
+                      if (data && data.items && data.items.length > 0) {
+                          rorIdMatch = data.items[0].id.replace('https://ror.org/', '');
+                      }
+                  }
+              } catch (e) {
+                  console.error("ROR API error:", e);
+              }
+          }
+
           return {
               ...p,
               uuid: generateUUID(),
@@ -1082,8 +1100,8 @@ const App: React.FC = () => {
               phone: p.phone || "",
               fax: p.fax || "",
               organizationIdentifiers: (() => {
-                  if (p.rorId) {
-                      return [{ scheme: 'ROR', value: p.rorId, link: `https://ror.org/${p.rorId}` }];
+                  if (rorIdMatch) {
+                      return [{ scheme: 'ROR', value: rorIdMatch, link: `https://ror.org/${rorIdMatch}` }];
                   }
                   return [{...INITIAL_ID}];
               })(),
@@ -1098,7 +1116,7 @@ const App: React.FC = () => {
               sectionCoordinates: p.sectionCoordinates,
               originalTexts: parseOriginalTexts(p.originalTexts)
           };
-      });
+      }));
 
       // Helper: split responsible persons whose names are still concatenated (safety net for LLM)
       const splitPersonSeparatorRegex = /\s+\/\s+|\s+&\s+|\s+and\s+/i;
