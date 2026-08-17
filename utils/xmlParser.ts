@@ -91,6 +91,17 @@ export const parseDrmdXml = (xmlString: string): DRMD => {
                         prod.address.countryCode = getNestedContent(loc, ["dcc:countryCode"]);
                     }
                 }
+
+                // Organization Identifiers (e.g. ROR)
+                const orgIds = p.getElementsByTagName("drmd:organizationIdentifier");
+                if (orgIds.length > 0) {
+                    prod.organizationIdentifiers = Array.from(orgIds).map(oi => ({
+                        scheme: getNestedContent(oi, ["drmd:scheme"]),
+                        value: getNestedContent(oi, ["drmd:value"]),
+                        link: getNestedContent(oi, ["drmd:link"])
+                    }));
+                }
+
                 return prod;
             });
         }
@@ -125,6 +136,7 @@ export const parseDrmdXml = (xmlString: string): DRMD => {
                 minimumSampleSize: "",
                 itemQuantities: "",
                 isCertified: false,
+                rmCode: "",
                 materialIdentifiers: [{...INITIAL_ID}]
             };
 
@@ -174,10 +186,19 @@ export const parseDrmdXml = (xmlString: string): DRMD => {
             prop.results = Array.from(results).map(r => {
                 // Read refId from <drmd:result refId="..."> and resolve to material UUID
                 let refMatId = "";
-                const refId = r.getAttribute("refId");
-                if (refId) {
-                    const matchedMat = data.materials.find(m => m.xmlId === refId);
-                    if (matchedMat) refMatId = matchedMat.uuid;
+                let linkedBatchLot: string | undefined = undefined;
+                const refIdStr = r.getAttribute("refId");
+                if (refIdStr) {
+                    const refs = refIdStr.split(/\s+/);
+                    for (const ref of refs) {
+                        const matchedMat = data.materials.find(m => m.xmlId === ref);
+                        if (matchedMat) {
+                            refMatId = matchedMat.uuid;
+                        }
+                        if (ref.startsWith("lot_")) {
+                            linkedBatchLot = ref.substring(4);
+                        }
+                    }
                 }
 
                 const res: MeasurementResult = {
@@ -185,6 +206,7 @@ export const parseDrmdXml = (xmlString: string): DRMD => {
                     name: getNestedContent(r, ["drmd:name", "dcc:content"]),
                     description: getNestedContent(r, ["drmd:description", "dcc:content"]),
                     materialRef: refMatId,
+                    linkedBatchLot: linkedBatchLot,
                     quantities: []
                 };
 

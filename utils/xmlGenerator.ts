@@ -240,17 +240,11 @@ export const generateDrmdXml = (data: DRMD): string => {
 <drmd:digitalReferenceMaterialDocument xmlns:dcc="https://ptb.de/dcc" xmlns:drmd="https://www.bam.de/drmd" xmlns:si="https://ptb.de/si" schemaVersion="0.3.0">`;
 
     // --- Administrative Data ---
-    let docUUID = data.administrativeData.uniqueIdentifier;
-    // If it doesn't look like a UUID, generate one for the XML
-    if (!docUUID || !docUUID.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
-        docUUID = uuid();
-    }
-    
     let adminXml = `
   <drmd:administrativeData>
     <drmd:coreData>
       <drmd:titleOfTheDocument>${escapeXml(data.administrativeData.title)}</drmd:titleOfTheDocument>
-      <drmd:uniqueIdentifier>${docUUID}</drmd:uniqueIdentifier>
+      <drmd:uniqueIdentifier>${escapeXml(data.administrativeData.uniqueIdentifier)}</drmd:uniqueIdentifier>
       <drmd:validity>
 ${renderValidity(data.administrativeData)}
       </drmd:validity>
@@ -277,7 +271,26 @@ ${renderValidity(data.administrativeData)}
           <dcc:city>${escapeXml(prod?.address?.city)}</dcc:city>
           <dcc:countryCode>${escapeXml(prod?.address?.countryCode)}</dcc:countryCode>
         </dcc:location>
-      </drmd:contact>
+      </drmd:contact>`;
+
+        // Organization Identifiers (e.g. ROR)
+        const validOrgIds = (prod.organizationIdentifiers || []).filter(id => id.value && id.value.trim() !== '');
+        if (validOrgIds.length > 0) {
+            adminXml += `
+      <drmd:organizationIdentifiers>`;
+            validOrgIds.forEach(id => {
+                adminXml += `
+        <drmd:organizationIdentifier>
+          <drmd:scheme>${escapeXml(id.scheme || 'ROR')}</drmd:scheme>
+          <drmd:value>${escapeXml(id.value)}</drmd:value>${id.link ? `
+          <drmd:link>${escapeXml(id.link)}</drmd:link>` : ''}
+        </drmd:organizationIdentifier>`;
+            });
+            adminXml += `
+      </drmd:organizationIdentifiers>`;
+        }
+
+        adminXml += `
     </drmd:referenceMaterialProducer>`;
     });
 
@@ -314,8 +327,7 @@ ${renderValidity(data.administrativeData)}
     let materialsXml = `
   <drmd:materials>`;
     (data.materials || []).forEach(mat => {
-        // Always use a random UUID for the material ID as requested
-        const matId = mat.uuid || uuid();
+        const matId = mat.xmlId || `mat_${sanitizeForId(mat.name)}`;
         materialsXml += `
     <drmd:material id="${escapeXml(matId)}">
       <drmd:name>
@@ -341,7 +353,7 @@ ${renderValidity(data.administrativeData)}
         const validIds = [...(mat.materialIdentifiers || []).filter(id => id.value && id.value.trim() !== "")];
         
         // Ensure RM Code is included as a catalogNumber identifier
-        const rmCode = data.administrativeData.uniqueIdentifier;
+        const rmCode = mat.rmCode || data.administrativeData.uniqueIdentifier;
         if (rmCode && !validIds.some(id => id.scheme === 'catalogNumber' && id.value === rmCode)) {
             validIds.unshift({ scheme: 'catalogNumber', value: rmCode });
         }
@@ -350,8 +362,12 @@ ${renderValidity(data.administrativeData)}
             materialsXml += `
       <drmd:materialIdentifiers>`;
             validIds.forEach((id, idx) => {
+                let idAttr = '';
+                if (id.scheme && (id.scheme.toLowerCase() === 'batch' || id.scheme.toLowerCase() === 'lot')) {
+                    idAttr = ` id="lot_${sanitizeForId(id.value)}"`;
+                }
                 materialsXml += `
-        <drmd:materialIdentifier>
+        <drmd:materialIdentifier${idAttr}>
           <drmd:scheme>${escapeXml(id.scheme || 'MaterialID')}</drmd:scheme>
           <drmd:value>${escapeXml(id.value)}</drmd:value>
         </drmd:materialIdentifier>`;
@@ -404,26 +420,26 @@ ${renderValidity(data.administrativeData)}
             const refSource = res.materialRef || prop.materialRef;
             if (refSource) {
                 const mat = (data.materials || []).find(m => m.uuid === refSource);
-                if (mat) resultRefId = mat.uuid; // Use UUID for refId instead of xmlId
+                if (mat) resultRefId = mat.xmlId || `mat_${sanitizeForId(mat.name)}`;
             } else if (data.materials.length === 1) {
-                resultRefId = data.materials[0].uuid; // Use UUID for refId
+                resultRefId = data.materials[0].xmlId || `mat_${sanitizeForId(data.materials[0].name)}`;
             }
-            const resultRefIdAttr = resultRefId ? ` refId="${escapeXml(resultRefId)}"` : '';
+            let resultRefIdList: string[] = [];
+            if (resultRefId) resultRefIdList.push(resultRefId);
+            if (res.linkedBatchLot) {
+                resultRefIdList.push(`lot_${sanitizeForId(res.linkedBatchLot)}`);
+            }
+            const resultRefIdAttr = resultRefIdList.length > 0 ? ` refId="${escapeXml(resultRefIdList.join(' '))}"` : '';
 
             propertiesXml += `
         <drmd:result${resultRefIdAttr}>
           <drmd:name>
             <dcc:content>${escapeXml(res.name || "Values")}</dcc:content>
           </drmd:name>`;
-            let resDesc = res.description || "";
-            if (res.linkedBatchLot) {
-                resDesc += (resDesc ? " | " : "") + `Linked Batch/Lot: ${res.linkedBatchLot}`;
-            }
-            
-            if (resDesc) {
+            if (res.description) {
                 propertiesXml += `
           <drmd:description>
-            <dcc:content>${escapeXml(resDesc)}</dcc:content>
+            <dcc:content>${escapeXml(res.description)}</dcc:content>
           </drmd:description>`;
             }
             propertiesXml += `

@@ -8,6 +8,7 @@ import { convertToDSI, getDsiPreview } from './utils/unitConverter';
 import { parseDrmdXml } from './utils/xmlParser';
 import { validateDrmd } from './utils/validator';
 import { getCasNumber } from './utils/casMapping';
+import { loadRorData, lookupRor, RorMatch } from './utils/rorLookup';
 
 // Helper for UUIDs
 const generateUUID = () => {
@@ -59,6 +60,10 @@ const generateHtmlReport = (data: DRMD) => {
         rows += renderRow('Fax', p.fax);
         const address = `${p.address.street} ${p.address.streetNo}, ${p.address.postCode} ${p.address.city}, ${p.address.countryCode}`.trim();
         rows += renderRow('Address', address.replace(/ ,/g, ''));
+        const rorIds = (p.organizationIdentifiers || []).filter(id => id.scheme === 'ROR' && id.value);
+        if (rorIds.length > 0) {
+            rows += renderRow('ROR ID', rorIds.map(id => `<a href="https://ror.org/${id.value}" target="_blank">${id.value}</a>`).join(', '));
+        }
         return rows;
     }).join('');
 
@@ -659,6 +664,10 @@ const App: React.FC = () => {
   const [bulkResults, setBulkResults] = useState<BulkResult[]>([]);
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0, currentFile: '' });
+  const [rorSuggestions, setRorSuggestions] = useState<Record<number, RorMatch[]>>({});
+
+  // Load ROR data on mount
+  useEffect(() => { loadRorData(); }, []);
 
   useEffect(() => {
       if (toastMessage) {
@@ -1075,7 +1084,17 @@ const App: React.FC = () => {
               email: p.email || "",
               phone: p.phone || "",
               fax: p.fax || "",
-              organizationIdentifiers: [{...INITIAL_ID}],
+              organizationIdentifiers: (() => {
+                  // Auto-lookup ROR from producer name
+                  const prodName = p.name || "";
+                  if (prodName) {
+                      const matches = lookupRor(prodName, 1, 0.6);
+                      if (matches.length > 0) {
+                          return [{ scheme: 'ROR', value: matches[0].id, link: matches[0].link }];
+                      }
+                  }
+                  return [{...INITIAL_ID}];
+              })(),
               address: {
                   street: p.address?.street || "",
                   streetNo: p.address?.streetNo || "",
@@ -1578,7 +1597,7 @@ const App: React.FC = () => {
                 <Select label="Title of Document *" value={drmdData.administrativeData.title} options={ALLOWED_TITLES} onChange={(v) => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, title: v}}))} />
                 <div className="flex gap-2 items-end">
                     <div className="flex-1">
-                        <Input label="Document UUID (XML ID) *" value={drmdData.administrativeData.uniqueIdentifier} onChange={(v) => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, uniqueIdentifier: v}}))} onFocus={() => handleHighlight(drmdData.administrativeData.fieldCoordinates?.uniqueIdentifier, null, drmdData.administrativeData.uniqueIdentifier, drmdData.administrativeData.originalTexts?.uniqueIdentifier)} onInfoClick={() => handleHighlight(drmdData.administrativeData.fieldCoordinates?.uniqueIdentifier, null, drmdData.administrativeData.uniqueIdentifier, drmdData.administrativeData.originalTexts?.uniqueIdentifier)} />
+                        <Input label="Unique Identifier *" value={drmdData.administrativeData.uniqueIdentifier} onChange={(v) => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, uniqueIdentifier: v}}))} onFocus={() => handleHighlight(drmdData.administrativeData.fieldCoordinates?.uniqueIdentifier, null, drmdData.administrativeData.uniqueIdentifier, drmdData.administrativeData.originalTexts?.uniqueIdentifier)} onInfoClick={() => handleHighlight(drmdData.administrativeData.fieldCoordinates?.uniqueIdentifier, null, drmdData.administrativeData.uniqueIdentifier, drmdData.administrativeData.originalTexts?.uniqueIdentifier)} />
                     </div>
                     <button onClick={() => setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, uniqueIdentifier: generateUUID()}}))} className="bg-gray-200 p-2 rounded mb-[2px] hover:bg-gray-300" title="Generate new UUID">🔄</button>
                 </div>
@@ -1675,6 +1694,103 @@ const App: React.FC = () => {
                                 <div className="col-span-1"><Input label="Country" value={prod.address.countryCode} onFocus={() => handleHighlight(prod.fieldCoordinates?.countryCode, prod.sectionCoordinates, prod.address.countryCode, prod.originalTexts?.countryCode)} onChange={(v) => { const list = [...drmdData.administrativeData.producers]; list[idx].address.countryCode = v; setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, producers: list}})); }} onInfoClick={() => handleHighlight(prod.fieldCoordinates?.countryCode, prod.sectionCoordinates, prod.address.countryCode, prod.originalTexts?.countryCode)} /></div>
                              </div>
                              <Input label="Fax" value={prod.fax} onFocus={() => handleHighlight(prod.fieldCoordinates?.fax, prod.sectionCoordinates, prod.fax, prod.originalTexts?.fax)} onChange={(v) => { const list = [...drmdData.administrativeData.producers]; list[idx].fax = v; setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, producers: list}})); }} onInfoClick={() => handleHighlight(prod.fieldCoordinates?.fax, prod.sectionCoordinates, prod.fax, prod.originalTexts?.fax)} />
+
+                             {/* ROR ID Section */}
+                             <div className="border-t border-gray-200 pt-3 mt-2 space-y-2">
+                                 <div className="flex justify-between items-center">
+                                     <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider">Organization Identifiers (ROR)</label>
+                                     <button onClick={() => {
+                                         const list = [...drmdData.administrativeData.producers];
+                                         list[idx].organizationIdentifiers = [...(list[idx].organizationIdentifiers || []), { scheme: 'ROR', value: '', link: '' }];
+                                         setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, producers: list}}));
+                                     }} className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded hover:bg-blue-100 font-medium">+ Add ROR</button>
+                                 </div>
+                                 {(prod.organizationIdentifiers || []).map((orgId, oidIdx) => (
+                                     <div key={oidIdx} className="flex items-center gap-2">
+                                         <div className="flex-1">
+                                             <div className="flex items-center gap-1">
+                                                 <span className="text-[10px] font-bold text-gray-400 uppercase">ROR ID</span>
+                                                 {orgId.value && <a href={`https://ror.org/${orgId.value}`} target="_blank" rel="noopener noreferrer" className="text-[10px] text-blue-500 hover:underline">↗ View</a>}
+                                             </div>
+                                             <div className="relative">
+                                                 <input
+                                                     type="text"
+                                                     value={orgId.value || ''}
+                                                     onChange={(e) => {
+                                                         const list = [...drmdData.administrativeData.producers];
+                                                         list[idx].organizationIdentifiers[oidIdx] = {
+                                                             scheme: 'ROR',
+                                                             value: e.target.value,
+                                                             link: e.target.value ? `https://ror.org/${e.target.value}` : ''
+                                                         };
+                                                         setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, producers: list}}));
+                                                     }}
+                                                     placeholder="e.g. 03x516a66"
+                                                     className="w-full bg-white border border-gray-200 text-sm px-2 py-1.5 rounded outline-none shadow-sm text-gray-700 font-mono"
+                                                 />
+                                             </div>
+                                         </div>
+                                         <div className="flex-[2]">
+                                             <div className="text-[10px] font-bold text-gray-400 uppercase">Matched Organization</div>
+                                             <div className="bg-gray-100 border border-gray-200 text-xs px-2 py-1.5 rounded text-gray-600 min-h-[30px] flex items-center">
+                                                 {orgId.value ? (() => {
+                                                     const matches = lookupRor(orgId.value, 1, 0.9);
+                                                     return matches.length > 0 ? matches[0].display : (orgId.link ? `ROR: ${orgId.value}` : 'No match in ROR database');
+                                                 })() : 'Enter ROR ID or click "Lookup from Name"'}
+                                             </div>
+                                         </div>
+                                         {(prod.organizationIdentifiers || []).length > 1 && (
+                                             <button onClick={() => {
+                                                 const list = [...drmdData.administrativeData.producers];
+                                                 list[idx].organizationIdentifiers.splice(oidIdx, 1);
+                                                 setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, producers: list}}));
+                                             }} className="text-red-400 hover:text-red-600 text-sm mt-3">🗑️</button>
+                                         )}
+                                     </div>
+                                 ))}
+                                 {prod.name && prod.name.trim() && (
+                                     <button
+                                         onClick={() => {
+                                             const matches = lookupRor(prod.name, 5, 0.4);
+                                             if (matches.length > 0) {
+                                                 setRorSuggestions(prev => ({...prev, [idx]: matches}));
+                                             } else {
+                                                 setRorSuggestions(prev => ({...prev, [idx]: []}));
+                                             }
+                                         }}
+                                         className="text-xs bg-green-50 text-green-700 px-2 py-1 rounded hover:bg-green-100 font-medium border border-green-200"
+                                     >🔍 Lookup ROR from Name: "{prod.name.length > 40 ? prod.name.substring(0, 40) + '...' : prod.name}"</button>
+                                 )}
+                                 {rorSuggestions[idx] && rorSuggestions[idx].length > 0 && (
+                                     <div className="bg-green-50 border border-green-200 rounded p-2 space-y-1">
+                                         <div className="text-[10px] font-bold text-green-600 uppercase">ROR Suggestions (click to apply)</div>
+                                         {rorSuggestions[idx].map((match, mIdx) => (
+                                             <button key={mIdx} onClick={() => {
+                                                 const list = [...drmdData.administrativeData.producers];
+                                                 // Set the first organization identifier to the selected match
+                                                 if (list[idx].organizationIdentifiers.length === 0 || (list[idx].organizationIdentifiers.length === 1 && !list[idx].organizationIdentifiers[0].value)) {
+                                                     list[idx].organizationIdentifiers = [{ scheme: 'ROR', value: match.id, link: match.link }];
+                                                 } else {
+                                                     list[idx].organizationIdentifiers.push({ scheme: 'ROR', value: match.id, link: match.link });
+                                                 }
+                                                 setDrmdData(p => ({...p, administrativeData: {...p.administrativeData, producers: list}}));
+                                                 setRorSuggestions(prev => { const next = {...prev}; delete next[idx]; return next; });
+                                             }} className="block w-full text-left text-xs px-2 py-1.5 rounded hover:bg-green-100 transition">
+                                                 <span className="font-mono text-green-800">{match.id}</span>
+                                                 <span className="text-gray-600 ml-2">{match.display}</span>
+                                                 <span className="text-gray-400 ml-1">({Math.round(match.score * 100)}%)</span>
+                                             </button>
+                                         ))}
+                                         <button onClick={() => setRorSuggestions(prev => { const next = {...prev}; delete next[idx]; return next; })} className="text-[10px] text-gray-400 hover:text-gray-600">Dismiss</button>
+                                     </div>
+                                 )}
+                                 {rorSuggestions[idx] && rorSuggestions[idx].length === 0 && (
+                                     <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                                         No ROR match found for "{prod.name}". You can enter the ROR ID manually.
+                                         <button onClick={() => setRorSuggestions(prev => { const next = {...prev}; delete next[idx]; return next; })} className="ml-2 text-gray-400 hover:text-gray-600">✕</button>
+                                     </div>
+                                 )}
+                             </div>
                         </div>
                      </div>
                 </div>
@@ -1720,7 +1836,7 @@ const App: React.FC = () => {
         <div className="flex justify-between items-center">
             <SectionHeader title="Materials" icon="🧪" />
             <button onClick={() => setDrmdData(p => ({...p, materials: [...p.materials, {
-                uuid: generateUUID(), xmlId: `mat_unknown`, name: "", description: "", materialClass: "", itemQuantities: "", minimumSampleSize: "", isCertified: false, materialIdentifiers: [{...INITIAL_ID}]
+                uuid: generateUUID(), xmlId: `mat_unknown`, name: "", rmCode: "", description: "", materialClass: "", itemQuantities: "", minimumSampleSize: "", isCertified: false, materialIdentifiers: [{...INITIAL_ID}]
             }]}))} className="text-sm bg-blue-50 text-blue-700 px-3 py-1 rounded hover:bg-blue-100 font-medium">+ Add Material</button>
         </div>
         
@@ -1736,39 +1852,39 @@ const App: React.FC = () => {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-3">
                         <Input label={drmdData.administrativeData.title === "referenceMaterialCertificate" ? "Name *" : "Name"} value={mat.name} onFocus={() => handleHighlight(mat.fieldCoordinates?.name, mat.sectionCoordinates, mat.name, mat.originalTexts?.name)} onChange={(v) => { const list = [...drmdData.materials]; list[idx].name = v; setDrmdData(p => ({...p, materials: list})); }} onInfoClick={() => handleHighlight(mat.fieldCoordinates?.name, mat.sectionCoordinates, mat.name, mat.originalTexts?.name)} />
+                        <Input label="RM Code (e.g. BAM-M386a)" value={mat.rmCode || ""} onChange={(v) => { const list = [...drmdData.materials]; list[idx].rmCode = v; setDrmdData(p => ({...p, materials: list})); }} />
                         <Input label="Assigned Material Identifier (XML ID)" value={mat.xmlId || ""} onChange={(v) => { const list = [...drmdData.materials]; list[idx].xmlId = v; setDrmdData(p => ({...p, materials: list})); }} />
                         
-                        <div className="space-y-2 mt-3">
-                            <div className="flex justify-between items-center">
-                                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider">Material Identifiers</label>
-                                <button onClick={() => { const list = [...drmdData.materials]; list[idx].materialIdentifiers.push({scheme: 'Batch', value: ''}); setDrmdData(p => ({...p, materials: list})); }} className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded hover:bg-gray-200">+ Add</button>
-                            </div>
-                            {mat.materialIdentifiers.map((mid, midIdx) => (
-                                <div key={midIdx} className="flex gap-2 items-center">
-                                    <select
-                                        value={mid.scheme || "MaterialID"}
-                                        onChange={(e) => { const list = [...drmdData.materials]; list[idx].materialIdentifiers[midIdx].scheme = e.target.value; setDrmdData(p => ({...p, materials: list})); }}
-                                        className="bg-gray-50 border border-gray-200 text-sm px-2 py-2 rounded outline-none w-1/3 text-gray-700"
-                                    >
-                                        <option value="Batch">Batch</option>
-                                        <option value="Lot">Lot</option>
-                                        <option value="catalogNumber">RM Code</option>
-                                        <option value="MaterialID">MaterialID</option>
-                                        <option value="CAS">CAS</option>
-                                    </select>
-                                    <div className="flex-1">
-                                        <input
-                                            type="text"
-                                            value={mid.value}
-                                            onChange={(e) => { const list = [...drmdData.materials]; list[idx].materialIdentifiers[midIdx].value = e.target.value; setDrmdData(p => ({...p, materials: list})); }}
-                                            className="bg-white border border-gray-200 text-sm px-2 py-2 rounded outline-none w-full shadow-sm"
-                                            placeholder="Value..."
-                                        />
-                                    </div>
-                                    <button onClick={() => { const list = [...drmdData.materials]; list[idx].materialIdentifiers.splice(midIdx, 1); setDrmdData(p => ({...p, materials: list})); }} className="text-red-400 hover:text-red-600">🗑️</button>
-                                </div>
-                            ))}
-                        </div>
+                        {mat.materialIdentifiers.map((mid, midIdx) => {
+                             const hasScheme = mid.scheme && mid.scheme !== "MaterialID" && mid.scheme.trim() !== "";
+                             const compositeValue = hasScheme ? `${mid.scheme}-${mid.value}` : mid.value;
+                             return (
+                                 <Input 
+                                     key={midIdx}
+                                     label="Material Identifier (e.g. Batch, Lot)" 
+                                     value={compositeValue}
+                                     onFocus={() => handleHighlight(mat.fieldCoordinates?.materialIdentifiers, mat.sectionCoordinates, compositeValue.trim())}
+                                     onChange={(val) => {
+                                         const list = [...drmdData.materials];
+                                         let scheme = "";
+                                         let value = val;
+                                         const hyphenIdx = val.indexOf('-');
+                                         const spaceIdx = val.indexOf(' ');
+                                         if (hyphenIdx !== -1) {
+                                             scheme = val.substring(0, hyphenIdx).trim();
+                                             value = val.substring(hyphenIdx + 1).trim();
+                                         } else if (spaceIdx !== -1) {
+                                             scheme = val.substring(0, spaceIdx).trim();
+                                             value = val.substring(spaceIdx + 1).trim();
+                                         }
+                                         list[idx].materialIdentifiers[midIdx].scheme = scheme;
+                                         list[idx].materialIdentifiers[midIdx].value = value;
+                                         setDrmdData(p => ({...p, materials: list}));
+                                     }}
+                                     onInfoClick={() => handleHighlight(mat.fieldCoordinates?.materialIdentifiers, mat.sectionCoordinates, compositeValue.trim())}
+                                 />
+                             );
+                        })}
 
                         <Input label="Material Class" value={mat.materialClass} onFocus={() => handleHighlight(mat.fieldCoordinates?.materialClass, mat.sectionCoordinates, mat.materialClass, mat.originalTexts?.materialClass)} onChange={(v) => { const list = [...drmdData.materials]; list[idx].materialClass = v; setDrmdData(p => ({...p, materials: list})); }} onInfoClick={() => handleHighlight(mat.fieldCoordinates?.materialClass, mat.sectionCoordinates, mat.materialClass, mat.originalTexts?.materialClass)} />
                         
@@ -1857,34 +1973,20 @@ const App: React.FC = () => {
                                     <div className="flex gap-4 mb-4 items-start">
                                         <div className="flex-1 space-y-3">
                                             <Input label="Table Name" value={res.name} onFocus={() => handleHighlight(res.sectionCoordinates, null, res.name)} onChange={(v) => { const list = [...drmdData.properties]; list[pIdx].results[rIdx].name = v; setDrmdData(p => ({...p, properties: list})); }} onInfoClick={() => handleHighlight(res.sectionCoordinates, null, res.name)} />
-                                            <div className="flex gap-2">
-                                                <div className="flex-1">
-                                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Linked Material</label>
-                                                    <select 
-                                                        value={res.materialRef || ""} 
-                                                        onChange={(e) => { const list = [...drmdData.properties]; list[pIdx].results[rIdx].materialRef = e.target.value; setDrmdData(p => ({...p, properties: list})); }}
-                                                        className="bg-white border border-gray-200 text-sm px-2 py-1.5 rounded outline-none w-full shadow-sm text-gray-700"
-                                                    >
-                                                        <option value="">None (Applies to all or N/A)</option>
-                                                        {drmdData.materials.map(m => (
-                                                            <option key={m.uuid} value={m.uuid}>{m.xmlId || m.name || "Unnamed Material"}</option>
-                                                        ))}
-                                                    </select>
-                                                </div>
-                                                <div className="flex-1">
-                                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Linked Batch/Lot</label>
-                                                    <select 
-                                                        value={res.linkedBatchLot || ""} 
-                                                        onChange={(e) => { const list = [...drmdData.properties]; list[pIdx].results[rIdx].linkedBatchLot = e.target.value; setDrmdData(p => ({...p, properties: list})); }}
-                                                        className="bg-white border border-gray-200 text-sm px-2 py-1.5 rounded outline-none w-full shadow-sm text-gray-700"
-                                                    >
-                                                        <option value="">None</option>
-                                                        {drmdData.materials.flatMap(m => m.materialIdentifiers.filter(mid => mid.scheme === 'Batch' || mid.scheme === 'Lot' || mid.scheme === 'catalogNumber').map((mid, i) => (
-                                                            <option key={`${m.uuid}-${i}`} value={mid.value}>{mid.scheme}: {mid.value}</option>
-                                                        )))}
-                                                    </select>
-                                                </div>
+                                            <div>
+                                                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Linked Material Identifier</label>
+                                                <select 
+                                                    value={res.materialRef || ""} 
+                                                    onChange={(e) => { const list = [...drmdData.properties]; list[pIdx].results[rIdx].materialRef = e.target.value; setDrmdData(p => ({...p, properties: list})); }}
+                                                    className="bg-white border border-gray-200 text-sm px-2 py-1.5 rounded outline-none w-full shadow-sm text-gray-700"
+                                                >
+                                                    <option value="">None (Applies to all or N/A)</option>
+                                                    {drmdData.materials.map(m => (
+                                                        <option key={m.uuid} value={m.uuid}>{m.xmlId || m.name || "Unnamed Material"}</option>
+                                                    ))}
+                                                </select>
                                             </div>
+                                            <Input label="Linked Batch/Lot" value={res.linkedBatchLot || ""} onChange={(v) => { const list = [...drmdData.properties]; list[pIdx].results[rIdx].linkedBatchLot = v; setDrmdData(p => ({...p, properties: list})); }} />
                                         </div>
                                         <div className="flex-[2]">
                                             <TextArea label="Table Description" value={res.description} onFocus={() => handleHighlight(res.sectionCoordinates, null, res.description)} onChange={(v) => { const list = [...drmdData.properties]; list[pIdx].results[rIdx].description = v; setDrmdData(p => ({...p, properties: list})); }} onInfoClick={() => handleHighlight(res.sectionCoordinates, null, res.description)} />

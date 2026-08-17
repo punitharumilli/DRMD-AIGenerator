@@ -33,7 +33,6 @@ Many certificates contain content in multiple languages (e.g., Portuguese and En
 **SECTION COORDINATES**: Extract bounding box of the ENTIRE section (all fields/labels/content) for each: Producer, Responsible Person block, Material block, MeasurementResult table.
 
 **ADMINISTRATIVE DATA**:
-- **uniqueIdentifier**: Extract the primary Reference Material Code or Certificate Number. Do NOT extract Lot or Batch numbers into this field. Lot and Batch numbers must ONLY go into the materials' 'materialIdentifiers' array.
 - **Producer**: Extract name, full address, email, phone, fax.
   - Phone: Look for "P:", "Phone:", "Tel:", or country codes (e.g. "+49"). Ensure extraction.
   - If city contains "Berlin" or "Adlershof", set countryCode="DE".
@@ -52,11 +51,12 @@ Many certificates contain content in multiple languages (e.g., Portuguese and En
   - ALL dates MUST be YYYY-MM-DD. MM/YYYY→last day of month (e.g. "05/2048"→"2048-05-31").
 
 **MATERIALS**: Extract name, description, minimum sample size, item quantities.
-- Material name is often the document's prominent title. Extract distinct fieldCoordinates for 'name'.
-- **Identifier**: Split RM code into scheme+value (e.g. "BAM-M386a"→scheme:"BAM", value:"M386a"). No prefix→use "MaterialID".
+- **Material name**: This should be the descriptive chemical/substance name (e.g., "Pure Copper", "Waste Water", "Soil"). Do NOT extract the RM Code (e.g. BAM-M386a) as the material name.
+- **RM Code**: Extract the formal reference material code (e.g., "BAM-M386a", "CRM001") into the 'rmCode' field.
+- **Identifier**: For any additional identifiers (CAS, etc.), split into scheme+value.
 - **Lot / Batch Numbers (CRITICAL)**:
   - Look for "Lot", "Lot No.", "Lote", "Batch", "Batch No.", "Batch no", "Charge", or similar labels in the certificate.
-  - Extract ALL lot/batch numbers found and add each as a materialIdentifier with scheme="Lot" or scheme="Batch" and value=the number/code.
+  - Extract ALL lot/batch numbers found and add each as a materialIdentifier with scheme="Lot" or scheme="Batch" and value=the number/code. DO NOT put Lot/Batch numbers into the rmCode field.
   - There may be 1, 2, 3 or more lot/batch numbers — include ALL of them.
   - Example: "Lot No.: CRM0011-01-A" → materialIdentifier {scheme: "Batch", value: "CRM0011-01-A"}.
   - Example: Certificate with "Batch 1: ABC-001" and "Batch 2: ABC-002" → TWO materialIdentifiers.
@@ -71,19 +71,18 @@ Many certificates contain content in multiple languages (e.g., Portuguese and En
 - Property=high-level section (e.g. "Certified Values"). MeasurementResult=specific table within it.
 - **EXCLUDE**: Tables with "Means of Accepted Data Sets", "Laboratory Means", "Participant Results", "Statistical Data", "Homogeneity", raw data.
 - **ONLY EXTRACT**: "Certified Values"/"Certified Property Values" and "Informative Values"/"Indicative Values"/"Additional Material Information" tables.
+- **TABLE SEPARATION RULES (CRITICAL)**: You MUST split properties into separate 'MeasurementResult' objects (tables) based on the following grouping rules. Never group properties into the same result object if they differ in ANY of these three factors:
+  1. **By Material**: If a single physical table lists properties for multiple different materials (e.g., rows for IAEA-C1, IAEA-C2), split them into separate result objects. Set the 'linkedMaterialName' on each result to the specific material name.
+  2. **By Batch/Lot Number**: If properties in a table are specific to different batch or lot numbers (even within the same material), split them into separate result objects. Set the 'linkedBatchLot' on each result to the specific lot/batch number.
+  3. **By Measurement Method**: If different properties/rows in a physical table were measured using different analytical methods, you MUST split them into separate result objects grouped by method. Each method should have its own set of properties in a separate 'MeasurementResult'.
 - Different column structures→separate MeasurementResult objects. Same table split by unit headers (e.g. "in %"/"in mg/kg")→merge into ONE.
-- **Multiple Materials in One Table (CRITICAL)**: If a single physical table contains properties for MULTIPLE materials (e.g., rows for IAEA-C1, IAEA-C2, etc.), you MUST split them into separate \`results\` objects within the properties array. Group the quantities by material, and set the \`linkedMaterialName\` on each result to the specific material name it describes.
 - **Table & Quantity Names (CRITICAL)**: 
   - MeasurementResult name: Use specific names (e.g. "Mass Fraction", "δ¹³C isotopic composition"). FORBIDDEN: "Table 1", "Raw Data".
   - Quantity name (Row name): If a table lists multiple distinct MATERIALS as rows, after splitting them into separate results, the Quantity 'name' should describe the property being measured, NOT just the material name.
 - **Footnotes**: Capture footnotes (1), 2), *) below a table into that MeasurementResult's 'description', NOT the Property description. If a footnote pointer references another page, go there and extract actual text with coordinates.
 - **Column mapping**: Values like "< 2" or "> 100"→put in 'value', leave 'uncertainty' empty.
-- **USED METHODS / PROCEDURES COLUMN (CRITICAL)**:
-  - Some tables have a "USED METHODS", "Method", or "Procedures" column that specifies the analytical method used for each row/quantity.
-  - If such a column exists, extract the full method text for each quantity row into the quantity's 'method' field.
-  - Example: A row "PROTEIN CONTENT" with method "NF EN ISO 20483: Cereals and pulses - Determination of the nitrogen content..." → set method="NF EN ISO 20483: Cereals and pulses - Determination of the nitrogen content..." on that quantity.
-  - Each quantity row may have a DIFFERENT method. Extract the exact method text per row.
-  - If no methods column exists in the table, leave the 'method' field empty.
+- **USED METHODS / PROCEDURES COLUMN**:
+  - Even after splitting tables by method, ensure you extract the full method text for each quantity row into the quantity's 'method' field.
   - Do NOT put the method text into the property-level 'procedures' field — put it on each individual quantity.
 - **Element names — Superscripts & Isotopes (CRITICAL RULES)**:
   - **Isotopes & Math (PRESERVE EXACTLY)**: Isotope mass numbers BEFORE or WITHIN the symbol (e.g., ¹⁴C, ²³⁹Pu, δ¹³C, ⁹⁰Sr) or math notation (log₁₀) MUST BE PRESERVED EXACTLY AS UNICODE SUPERSCRIPTS/SUBSCRIPTS. Do NOT convert ¹⁴C to 14C! Keep it as ¹⁴C. Do NOT convert δ¹³C to δ13C! Keep it as δ¹³C.
@@ -218,7 +217,6 @@ const RESPONSE_SCHEMA = {
         administrativeData: {
             type: Type.OBJECT,
             properties: {
-                uniqueIdentifier: { type: Type.STRING, description: "The primary RM Code or Certificate Number. Do NOT put Lot or Batch numbers here." },
                 title: { type: Type.STRING },
                 validityType: { type: Type.STRING, enum: ["Until Revoked", "Time After Dispatch", "Specific Time"] },
                 durationY: { type: Type.INTEGER },
@@ -285,6 +283,7 @@ const RESPONSE_SCHEMA = {
                 type: Type.OBJECT,
                 properties: {
                     name: { type: Type.STRING },
+                    rmCode: { type: Type.STRING },
                     description: { type: Type.STRING },
                     minimumSampleSize: { type: Type.STRING },
                     materialClass: { type: Type.STRING },
