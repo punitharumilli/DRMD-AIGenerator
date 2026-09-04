@@ -2,12 +2,12 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { 
     DRMD, INITIAL_DRMD, INITIAL_PRODUCER, INITIAL_PERSON, INITIAL_ID, INITIAL_QUANTITY, ALLOWED_TITLES, BulkResult
 } from './types';
-import { extractStructuredDataFromPdf, decideRorId } from './services/llmService';
+import { extractStructuredDataFromPdf, decideRorId, decideChemicalIdentifiers } from './services/llmService';
 import { generateDrmdXml } from './utils/xmlGenerator';
 import { convertToDSI, getDsiPreview } from './utils/unitConverter';
 import { parseDrmdXml } from './utils/xmlParser';
 import { validateDrmd } from './utils/validator';
-import { getCasNumber } from './utils/casMapping';
+import { lookupChemicalIdentifiers } from './utils/chemicalIdentifierService';
 
 
 // Helper for UUIDs
@@ -109,10 +109,13 @@ const generateHtmlReport = (data: DRMD) => {
                                 <th style="width: 10%; padding: 8px;">Uncertainty</th>
                                 <th style="width: 8%; padding: 8px;">k</th>
                                 <th style="width: 8%; padding: 8px;">Prob.</th>
-                                <th style="width: 15%; padding: 8px;">Identifier (CAS)</th>
+                                <th style="width: 15%; padding: 8px;">Identifiers</th>
                             </tr>
-                            ${r.quantities.map(q => {
-                                const cas = getCasNumber(q.name);
+                            ${r.quantities.map((q: any) => {
+                                const identifiersStr = (q.identifiers || [])
+                                    .filter((id: any) => id.scheme && id.value && id.value.trim() !== '')
+                                    .map((id: any) => `<b>${id.scheme}:</b> ${id.value}`)
+                                    .join('<br/>');
                                 return `
                                 <tr>
                                     <td style="padding: 8px;">${q.name}</td>
@@ -122,7 +125,7 @@ const generateHtmlReport = (data: DRMD) => {
                                     <td style="padding: 8px;">${q.uncertainty || ''}</td>
                                     <td style="padding: 8px;">${q.coverageFactor || ''}</td>
                                     <td style="padding: 8px;">${q.coverageProbability || ''}</td>
-                                    <td style="padding: 8px;">${cas || ''}</td>
+                                    <td style="padding: 8px; font-size: 11px;">${identifiersStr || ''}</td>
                                 </tr>
                                 `;
                             }).join('')}
@@ -1186,6 +1189,64 @@ const App: React.FC = () => {
           }
       });
 
+      // Chemical Identifiers Resolution
+      const uniqueChemicals = new Map<string, any>();
+
+      finalProps.forEach(p => {
+          p.results.forEach((r: any) => {
+              r.quantities.forEach((q: any) => {
+                  if (q.name && !uniqueChemicals.has(q.name.toLowerCase())) {
+                      uniqueChemicals.set(q.name.toLowerCase(), { name: q.name, context: 'Property Quantity' });
+                  }
+              });
+          });
+      });
+
+      newMats.forEach((m: any) => {
+          if (m.name && !uniqueChemicals.has(m.name.toLowerCase())) {
+              uniqueChemicals.set(m.name.toLowerCase(), { name: m.name, context: 'Material' });
+          }
+      });
+
+      const resolvedChemicals = new Map<string, any>();
+      await Promise.all(Array.from(uniqueChemicals.values()).map(async (chem) => {
+          const apiResults = await lookupChemicalIdentifiers(chem.name);
+          const decided = await decideChemicalIdentifiers(chem.name, chem.context, apiResults, geminiApiKey);
+          resolvedChemicals.set(chem.name.toLowerCase(), decided);
+      }));
+
+      finalProps.forEach(p => {
+          p.results.forEach((r: any) => {
+              r.quantities.forEach((q: any) => {
+                  const resolved = resolvedChemicals.get((q.name || "").toLowerCase());
+                  if (resolved) {
+                      q.identifiers = [];
+                      if (resolved.cas) {
+                          q.identifiers.push({ scheme: 'CAS', value: resolved.cas, link: `https://commonchemistry.cas.org/detail?cas_rn=${resolved.cas}` });
+                      }
+                      if (resolved.inchiKey) {
+                          q.identifiers.push({ scheme: 'InChIKey', value: resolved.inchiKey, link: resolved.pubchemCid ? `https://pubchem.ncbi.nlm.nih.gov/compound/${resolved.pubchemCid}` : '' });
+                      }
+                      if (q.identifiers.length === 0) {
+                          q.identifiers.push({...INITIAL_ID});
+                      }
+                  }
+              });
+          });
+      });
+
+      newMats.forEach((m: any) => {
+          const resolved = resolvedChemicals.get((m.name || "").toLowerCase());
+          if (resolved) {
+              if (resolved.cas) {
+                  m.materialIdentifiers.push({ scheme: 'CAS', value: resolved.cas, link: `https://commonchemistry.cas.org/detail?cas_rn=${resolved.cas}` });
+              }
+              if (resolved.inchiKey) {
+                  m.materialIdentifiers.push({ scheme: 'InChIKey', value: resolved.inchiKey, link: resolved.pubchemCid ? `https://pubchem.ncbi.nlm.nih.gov/compound/${resolved.pubchemCid}` : '' });
+              }
+          }
+      });
+
       let validType = prev.administrativeData.validityType;
       if (extractedData?.administrativeData?.validityType) {
           const vt = extractedData.administrativeData.validityType;
@@ -1983,7 +2044,7 @@ const App: React.FC = () => {
                                             <thead className="bg-gray-100">
                                                 <tr>
                                                     <th className="px-2 py-2 text-left w-32">Name *</th>
-                                                    <th className="px-2 py-2 text-left w-24">CAS</th>
+                                                    <th className="px-2 py-2 text-left w-32">Identifiers</th>
                                                     <th className="px-2 py-2 text-left w-24">Value *</th>
                                                     <th className="px-2 py-2 text-left w-24">Uncertainty</th>
                                                     <th className="px-2 py-2 text-left w-20">Unit *</th>
@@ -2031,8 +2092,15 @@ const App: React.FC = () => {
                                                             />
                                                         </td>
                                                         <td className="p-1">
-                                                            <div className="w-full border-b border-transparent bg-gray-50 text-gray-600 text-xs px-1 py-2 overflow-x-auto whitespace-nowrap font-mono">
-                                                                {getCasNumber(q.name) || "-"}
+                                                            <div className="w-full border-b border-transparent bg-gray-50 text-gray-600 text-[10px] px-1 py-1 overflow-x-auto font-mono flex flex-col gap-1 min-h-[32px]">
+                                                                {(q.identifiers || []).filter((id: any) => id.scheme && id.value && id.value.trim() !== '').length > 0 
+                                                                    ? (q.identifiers || []).filter((id: any) => id.scheme && id.value && id.value.trim() !== '').map((id: any, i: number) => (
+                                                                        <div key={i}>
+                                                                            <span className="font-bold">{id.scheme}:</span> {id.link ? <a href={id.link} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">{id.value}</a> : id.value}
+                                                                        </div>
+                                                                    ))
+                                                                    : <span className="text-gray-400 mt-1">-</span>
+                                                                }
                                                             </div>
                                                         </td>
                                                         <td className="p-1 relative group-td">

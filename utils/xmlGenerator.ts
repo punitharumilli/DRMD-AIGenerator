@@ -2,7 +2,6 @@
 
 import { DRMD } from "../types";
 import { convertToDSI } from "./unitConverter";
-import { getCasNumber } from "./casMapping";
 
 const escapeXml = (unsafe: string | undefined | number | boolean) => {
     if (unsafe === undefined || unsafe === null) return '';
@@ -369,7 +368,8 @@ ${renderValidity(data.administrativeData)}
                 materialsXml += `
         <drmd:materialIdentifier${idAttr}>
           <drmd:scheme>${escapeXml(id.scheme || 'MaterialID')}</drmd:scheme>
-          <drmd:value>${escapeXml(id.value)}</drmd:value>
+          <drmd:value>${escapeXml(id.value)}</drmd:value>${id.link ? `
+          <drmd:link>${escapeXml(id.link)}</drmd:link>` : ''}
         </drmd:materialIdentifier>`;
             });
             materialsXml += `
@@ -456,16 +456,19 @@ ${renderValidity(data.administrativeData)}
                   <dcc:content>${escapeXml(q.name)}</dcc:content>
                 </dcc:name>${renderAdvancedQuantity(q)}`;
 
-                // Automatically generate CAS Identifier if available
-                const casNumber = getCasNumber(q.name);
-                if (casNumber) {
+                const validIds = (q.identifiers || []).filter((id: any) => id.scheme && id.value && id.value.trim() !== "");
+                if (validIds.length > 0) {
                     propertiesXml += `
-                <drmd:propertyIdentifiers>
+                <drmd:propertyIdentifiers>`;
+                    validIds.forEach((id: any) => {
+                        propertiesXml += `
                     <drmd:propertyIdentifier>
-                        <drmd:scheme>CAS</drmd:scheme>
-                        <drmd:value>${escapeXml(casNumber)}</drmd:value>
-                        <drmd:link>https://commonchemistry.cas.org/detail?cas_rn=${escapeXml(casNumber)}</drmd:link>
-                    </drmd:propertyIdentifier>
+                        <drmd:scheme>${escapeXml(id.scheme)}</drmd:scheme>
+                        <drmd:value>${escapeXml(id.value)}</drmd:value>${id.link ? `
+                        <drmd:link>${escapeXml(id.link)}</drmd:link>` : ''}
+                    </drmd:propertyIdentifier>`;
+                    });
+                    propertiesXml += `
                 </drmd:propertyIdentifiers>`;
                 }
 

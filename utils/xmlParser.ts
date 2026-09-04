@@ -164,6 +164,24 @@ export const parseDrmdXml = (xmlString: string): DRMD => {
             mat.minimumSampleSize = parseQty("drmd:minimumSampleSize");
             mat.itemQuantities = parseQty("drmd:itemQuantities");
 
+            const matIdsNode = m.getElementsByTagName("drmd:materialIdentifiers")[0];
+            if (matIdsNode) {
+                const matIds = matIdsNode.getElementsByTagName("drmd:materialIdentifier");
+                if (matIds.length > 0) {
+                    mat.materialIdentifiers = Array.from(matIds).map(mi => ({
+                        scheme: getNestedContent(mi, ["drmd:scheme"]),
+                        value: getNestedContent(mi, ["drmd:value"]),
+                        link: getNestedContent(mi, ["drmd:link"])
+                    }));
+                    
+                    // Extract rmCode from catalogNumber if present
+                    const catalogId = mat.materialIdentifiers.find(id => id.scheme === 'catalogNumber');
+                    if (catalogId) {
+                        mat.rmCode = catalogId.value;
+                    }
+                }
+            }
+
             return mat;
         });
     }
@@ -229,6 +247,19 @@ export const parseDrmdXml = (xmlString: string): DRMD => {
                              quant.coverageProbability = getNestedContent(expandedMU, ["si:coverageProbability"]);
                         }
                     }
+
+                    const propIdsNode = q.getElementsByTagName("drmd:propertyIdentifiers")[0];
+                    if (propIdsNode) {
+                        const propIds = propIdsNode.getElementsByTagName("drmd:propertyIdentifier");
+                        if (propIds.length > 0) {
+                            quant.identifiers = Array.from(propIds).map(pi => ({
+                                scheme: getNestedContent(pi, ["drmd:scheme"]),
+                                value: getNestedContent(pi, ["drmd:value"]),
+                                link: getNestedContent(pi, ["drmd:link"])
+                            }));
+                        }
+                    }
+
                     return quant;
                 });
                 return res;

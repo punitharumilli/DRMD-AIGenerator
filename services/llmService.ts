@@ -535,3 +535,59 @@ If none of the candidates are a strong match for this specific producer, return 
         return "";
     }
 };
+export const decideChemicalIdentifiers = async (
+    chemicalName: string,
+    context: string,
+    apiResults: any,
+    apiKey: string
+): Promise<{ cas?: string; inchiKey?: string; pubchemCid?: string }> => {
+    if (!apiResults || Object.keys(apiResults).length === 0) return {};
+    
+    const ai = new GoogleGenAI({ apiKey: apiKey });
+
+    const prompt = \You are an expert in chemical nomenclature and identifiers.
+You are given an extracted chemical/element name from a Reference Material document, the context of where it was found, and raw API search results from PubChem and CAS Common Chemistry.
+
+Extracted Chemical Name: "\"
+Context: \
+
+API Results:
+\
+
+Task:
+Determine the correct CAS Registry Number and InChIKey for this chemical.
+CAS numbers are typically found in the PubChem synonyms list formatted as digits with hyphens (e.g., 7440-50-8) or in the CAS API results.
+InChIKey is found in the PubChem property results.
+PubChem CID is also needed to construct the PubChem link.
+
+If a match is found, return the precise identifiers. If no reliable match can be determined, return empty strings.\;
+
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        cas: { type: Type.STRING, description: "The validated CAS number (e.g. 7440-50-8)." },
+                        inchiKey: { type: Type.STRING, description: "The validated InChIKey without any prefixes." },
+                        pubchemCid: { type: Type.STRING, description: "The PubChem CID (as a string) if available." }
+                    }
+                },
+                temperature: 0
+            }
+        });
+
+        const text = response.text;
+        if (text) {
+            const cleaned = text.replace(/^\\\\\\json/i, '').replace(/\\\\\\$/, '').trim();
+            return JSON.parse(cleaned);
+        }
+        return {};
+    } catch (e) {
+        console.error("Error in decideChemicalIdentifiers LLM call:", e);
+        return {};
+    }
+};
