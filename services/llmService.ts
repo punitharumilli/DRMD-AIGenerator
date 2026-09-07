@@ -545,14 +545,14 @@ export const decideChemicalIdentifiers = async (
     
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
-    const prompt = \You are an expert in chemical nomenclature and identifiers.
+    const prompt = `You are an expert in chemical nomenclature and identifiers.
 You are given an extracted chemical/element name from a Reference Material document, the context of where it was found, and raw API search results from PubChem and CAS Common Chemistry.
 
-Extracted Chemical Name: "\"
-Context: \
+Extracted Chemical Name: "${chemicalName}"
+Context: ${context}
 
 API Results:
-\
+${JSON.stringify(apiResults, null, 2)}
 
 Task:
 Determine the correct CAS Registry Number and InChIKey for this chemical.
@@ -560,7 +560,7 @@ CAS numbers are typically found in the PubChem synonyms list formatted as digits
 InChIKey is found in the PubChem property results.
 PubChem CID is also needed to construct the PubChem link.
 
-If a match is found, return the precise identifiers. If no reliable match can be determined, return empty strings.\;
+If a match is found, return the precise identifiers. If no reliable match can be determined, return empty strings.`;
 
     try {
         const response = await ai.models.generateContent({
@@ -582,7 +582,7 @@ If a match is found, return the precise identifiers. If no reliable match can be
 
         const text = response.text;
         if (text) {
-            const cleaned = text.replace(/^\\\\\\json/i, '').replace(/\\\\\\$/, '').trim();
+            const cleaned = text.replace(/^```json/i, '').replace(/```$/i, '').trim();
             return JSON.parse(cleaned);
         }
         return {};
