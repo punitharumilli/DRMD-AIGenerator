@@ -898,9 +898,7 @@ const App: React.FC = () => {
                   return {
                       ...q,
                       uuid: generateUUID(),
-                      identifiers: (q.identifiers && Array.isArray(q.identifiers) && q.identifiers.length > 0)
-                          ? q.identifiers
-                          : [{...INITIAL_ID}],
+                      identifiers: [{...INITIAL_ID}],
                       name: q.name || "",
                       value: finalValue,
                       unit: finalUnit,
@@ -1197,115 +1195,54 @@ const App: React.FC = () => {
       finalProps.forEach(p => {
           p.results.forEach((r: any) => {
               r.quantities.forEach((q: any) => {
-                  const key = (q.name || "").trim().toLowerCase();
-                  if (key && !uniqueChemicals.has(key)) {
-                      uniqueChemicals.set(key, { name: q.name.trim(), context: 'Property Quantity' });
+                  if (q.name && !uniqueChemicals.has(q.name.toLowerCase())) {
+                      uniqueChemicals.set(q.name.toLowerCase(), { name: q.name, context: 'Property Quantity' });
                   }
               });
           });
       });
 
       newMats.forEach((m: any) => {
-          const key = (m.name || "").trim().toLowerCase();
-          if (key && !uniqueChemicals.has(key)) {
-              uniqueChemicals.set(key, { name: m.name.trim(), context: 'Material' });
+          if (m.name && !uniqueChemicals.has(m.name.toLowerCase())) {
+              uniqueChemicals.set(m.name.toLowerCase(), { name: m.name, context: 'Material' });
           }
       });
 
       const resolvedChemicals = new Map<string, any>();
-      const chemList = Array.from(uniqueChemicals.values());
-      const BATCH_SIZE = 3;
-      for (let i = 0; i < chemList.length; i += BATCH_SIZE) {
-          const batch = chemList.slice(i, i + BATCH_SIZE);
-          await Promise.all(batch.map(async (chem) => {
-              try {
-                  const apiResults = await lookupChemicalIdentifiers(chem.name);
-                  const decided = await decideChemicalIdentifiers(chem.name, chem.context, apiResults, geminiApiKey);
-                  resolvedChemicals.set(chem.name.toLowerCase().trim(), decided);
-              } catch (err) {
-                  console.warn(`Error resolving chemical identifiers for ${chem.name}:`, err);
-              }
-          }));
-          if (i + BATCH_SIZE < chemList.length) {
-              await new Promise(res => setTimeout(res, 200));
-          }
-      }
+      await Promise.all(Array.from(uniqueChemicals.values()).map(async (chem) => {
+          const apiResults = await lookupChemicalIdentifiers(chem.name);
+          const decided = await decideChemicalIdentifiers(chem.name, chem.context, apiResults, geminiApiKey);
+          resolvedChemicals.set(chem.name.toLowerCase(), decided);
+      }));
 
       finalProps.forEach(p => {
           p.results.forEach((r: any) => {
               r.quantities.forEach((q: any) => {
-                  const key = (q.name || "").toLowerCase().trim();
-                  const resolved = resolvedChemicals.get(key);
-
-                  // Collect existing valid identifiers (e.g. from PDF extraction)
-                  const existingIds = (q.identifiers || []).filter((id: any) => id.scheme && id.value && id.value.trim() !== "");
-                  const newIds: any[] = [];
-
-                  // Determine CAS
-                  let casValue = resolved?.cas;
-                  if (!casValue) {
-                      const existingCas = existingIds.find((id: any) => id.scheme?.toUpperCase() === 'CAS');
-                      if (existingCas) casValue = existingCas.value;
-                  }
-                  if (casValue) {
-                      newIds.push({
-                          scheme: 'CAS',
-                          value: casValue,
-                          link: `https://commonchemistry.cas.org/detail?cas_rn=${casValue}`
-                      });
-                  }
-
-                  // Determine InChIKey
-                  let inchiKeyValue = resolved?.inchiKey;
-                  let pubchemCid = resolved?.pubchemCid;
-                  if (!inchiKeyValue) {
-                      const existingInchi = existingIds.find((id: any) => id.scheme?.toUpperCase() === 'INCHIKEY');
-                      if (existingInchi) {
-                          inchiKeyValue = existingInchi.value;
-                          if (existingInchi.link) {
-                              const m = existingInchi.link.match(/compound\/(\d+)/);
-                              if (m) pubchemCid = m[1];
-                          }
+                  const resolved = resolvedChemicals.get((q.name || "").toLowerCase());
+                  if (resolved) {
+                      q.identifiers = [];
+                      if (resolved.cas) {
+                          q.identifiers.push({ scheme: 'CAS', value: resolved.cas, link: `https://commonchemistry.cas.org/detail?cas_rn=${resolved.cas}` });
                       }
-                  }
-                  if (inchiKeyValue) {
-                      newIds.push({
-                          scheme: 'InChIKey',
-                          value: inchiKeyValue,
-                          link: pubchemCid ? `https://pubchem.ncbi.nlm.nih.gov/compound/${pubchemCid}` : ''
-                      });
-                  }
-
-                  // Keep any other non-CAS/non-InChIKey identifiers that might have been extracted
-                  existingIds.forEach((id: any) => {
-                      const s = id.scheme?.toUpperCase();
-                      if (s !== 'CAS' && s !== 'INCHIKEY' && !newIds.some(n => n.scheme === id.scheme && n.value === id.value)) {
-                          newIds.push(id);
+                      if (resolved.inchiKey) {
+                          q.identifiers.push({ scheme: 'InChIKey', value: resolved.inchiKey, link: resolved.pubchemCid ? `https://pubchem.ncbi.nlm.nih.gov/compound/${resolved.pubchemCid}` : '' });
                       }
-                  });
-
-                  if (newIds.length > 0) {
-                      q.identifiers = newIds;
-                  } else {
-                      q.identifiers = [{...INITIAL_ID}];
+                      if (q.identifiers.length === 0) {
+                          q.identifiers.push({...INITIAL_ID});
+                      }
                   }
               });
           });
       });
 
       newMats.forEach((m: any) => {
-          const key = (m.name || "").toLowerCase().trim();
-          const resolved = resolvedChemicals.get(key);
+          const resolved = resolvedChemicals.get((m.name || "").toLowerCase());
           if (resolved) {
-              m.materialIdentifiers = (m.materialIdentifiers || []).filter((id: any) => id.value && id.value.trim() !== "");
-              if (resolved.cas && !m.materialIdentifiers.some((id: any) => id.scheme === 'CAS')) {
+              if (resolved.cas) {
                   m.materialIdentifiers.push({ scheme: 'CAS', value: resolved.cas, link: `https://commonchemistry.cas.org/detail?cas_rn=${resolved.cas}` });
               }
-              if (resolved.inchiKey && !m.materialIdentifiers.some((id: any) => id.scheme === 'InChIKey')) {
+              if (resolved.inchiKey) {
                   m.materialIdentifiers.push({ scheme: 'InChIKey', value: resolved.inchiKey, link: resolved.pubchemCid ? `https://pubchem.ncbi.nlm.nih.gov/compound/${resolved.pubchemCid}` : '' });
-              }
-              if (m.materialIdentifiers.length === 0) {
-                  m.materialIdentifiers.push({...INITIAL_ID});
               }
           }
       });

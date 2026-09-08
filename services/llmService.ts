@@ -5,6 +5,57 @@ import { DRMD } from "../types";
 import { convertToDSI } from "../utils/unitConverter";
 import { isValidCas } from "../utils/chemicalIdentifierService";
 
+// ---- Model configuration ----------------------------------------------------
+// Primary model plus a lower-version multimodal-capable fallback. The fallback is
+// tried automatically if the primary model is unavailable (e.g. not enabled for the
+// API key, or a "model not found" error). All models listed here support multimodal
+// (PDF/vision) input, so they are safe for the document-extraction call.
+const PRIMARY_MODEL = 'gemini-3.6-flash';
+const FALLBACK_MODEL = 'gemini-2.5-flash';
+const MODEL_CHAIN = [PRIMARY_MODEL, FALLBACK_MODEL];
+
+// Errors that indicate the model itself is unusable, so we should try the next model
+// in the chain rather than surfacing the error.
+const isModelUnavailableError = (error: any): boolean => {
+    const status = error?.status;
+    const msg = String(error?.message || '').toLowerCase();
+    return (
+        status === 404 ||
+        msg.includes('not found') ||
+        msg.includes('not supported') ||
+        msg.includes('does not exist') ||
+        msg.includes('unsupported model') ||
+        msg.includes('permission') && msg.includes('model')
+    );
+};
+
+/**
+ * Runs a generateContent call, transparently falling back through MODEL_CHAIN if the
+ * primary model is unavailable. Non-model errors (rate limits, bad requests) are re-thrown
+ * so the caller's own retry/error handling still applies.
+ */
+const generateWithModelFallback = async (
+    ai: GoogleGenAI,
+    params: { contents: any; config?: any }
+) => {
+    let lastErr: any = null;
+    for (let i = 0; i < MODEL_CHAIN.length; i++) {
+        const model = MODEL_CHAIN[i];
+        try {
+            return await ai.models.generateContent({ ...params, model } as any);
+        } catch (error: any) {
+            lastErr = error;
+            const hasNext = i < MODEL_CHAIN.length - 1;
+            if (hasNext && isModelUnavailableError(error)) {
+                console.warn(`Model "${model}" unavailable, falling back to "${MODEL_CHAIN[i + 1]}".`, error?.message || error);
+                continue;
+            }
+            throw error;
+        }
+    }
+    throw lastErr;
+};
+
 const SYSTEM_INSTRUCTION = `
 You are an expert in Reference Material documents (both Certificates and Product Information Sheets). Extract structured data from a PDF into DRMD JSON format.
 
@@ -342,18 +393,6 @@ const RESPONSE_SCHEMA = {
                                             coverageProbability: { type: Type.STRING },
                                             distribution: { type: Type.STRING },
                                             method: { type: Type.STRING, description: "If the table has a USED METHODS or Method column, extract the full method text for this specific quantity row." },
-                                            identifiers: {
-                                                type: Type.ARRAY,
-                                                items: {
-                                                    type: Type.OBJECT,
-                                                    properties: {
-                                                        scheme: { type: Type.STRING, description: "Scheme e.g. 'CAS' or 'InChIKey'" },
-                                                        value: { type: Type.STRING, description: "Identifier value e.g. '7440-50-8'" },
-                                                        link: { type: Type.STRING }
-                                                    }
-                                                },
-                                                description: "Any chemical identifiers explicitly present in the document for this quantity/property."
-                                            },
                                             fieldCoordinates: QuantityCoordSchema
                                         }
                                     }
@@ -386,43 +425,6 @@ const RESPONSE_SCHEMA = {
     }
 } as const;
 
-const GEMINI_FLASH_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-2.0-flash'];
-
-export const generateContentWithModelFallback = async (
-    ai: any,
-    params: {
-        contents: any;
-        config?: any;
-    },
-    models: string[] = GEMINI_FLASH_MODELS
-): Promise<{ text: string; usedModel: string }> => {
-    let lastErr: any = null;
-    for (let i = 0; i < models.length; i++) {
-        const model = models[i];
-        try {
-            const response = await ai.models.generateContent({
-                model: model,
-                contents: params.contents,
-                config: params.config
-            });
-            return { text: response.text || '', usedModel: model };
-        } catch (err: any) {
-            lastErr = err;
-            const msg = (err?.message || '').toLowerCase();
-            const status = String(err?.status || '');
-            const isNotFound = status === '404' || status === 'NOT_FOUND' || 
-                msg.includes('404') || msg.includes('not_found') || 
-                msg.includes('no longer available') || msg.includes('not found');
-            if (isNotFound && i < models.length - 1) {
-                console.warn(`Model "${model}" not available (${err?.message || '404'}). Falling back to "${models[i + 1]}"...`);
-                continue;
-            }
-            throw err;
-        }
-    }
-    throw lastErr;
-};
-
 export const extractStructuredDataFromPdf = async (base64File: string, mimeType: string, apiKey: string, temperature: number = 0): Promise<Partial<DRMD>> => {
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
@@ -432,7 +434,7 @@ export const extractStructuredDataFromPdf = async (base64File: string, mimeType:
 
     while (attempt < maxRetries) {
         try {
-            const response = await generateContentWithModelFallback(ai, {
+            const response = await generateWithModelFallback(ai, {
                 contents: {
                     parts: [
                         {
@@ -553,14 +555,14 @@ If you find a strong match, extract its ID (the part after 'https://ror.org/') a
 If none of the candidates are a strong match for this specific producer, return an empty string for the rorId.`;
 
     try {
-        const response = await generateContentWithModelFallback(ai, {
+        const response = await generateWithModelFallback(ai, {
             contents: prompt,
             config: {
                 responseMimeType: "application/json",
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
-                        rorId: { 
+                        rorId: {
                             type: Type.STRING,
                             description: "The official bare ROR ID (e.g. '03x516a66') of the matched organization. If none of the candidates match, return an empty string."
                         }
@@ -589,57 +591,48 @@ export const decideChemicalIdentifiers = async (
     apiResults: any,
     apiKey: string
 ): Promise<{ cas?: string; inchiKey?: string; pubchemCid?: string }> => {
-    // Basic fallback values from pre-resolved API results
-    const defaultCas = apiResults?.knownCas || apiResults?.casCandidates?.[0] || undefined;
-    const defaultInchiKey = apiResults?.inchiKey || undefined;
-    const defaultPubchemCid = apiResults?.pubchemCid || undefined;
-
-    if (!apiKey) {
-        return { cas: defaultCas, inchiKey: defaultInchiKey, pubchemCid: defaultPubchemCid };
-    }
-
+    if (!apiResults || Object.keys(apiResults).length === 0) return {};
+    
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
-    const prompt = `You are a world-class expert in chemical nomenclature, metallurgy, and chemical identifiers.
-You are given an extracted chemical/element name from a Certified Reference Material (CRM) document, the context of where it was found, and pre-filtered API search results from PubChem and chemical registry databases.
+    // Pre-computed, deterministically-validated candidates from the lookup service.
+    const casCandidates: string[] = Array.isArray(apiResults?.casCandidates) ? apiResults.casCandidates : [];
+    const apiInchiKey: string = apiResults?.inchiKey || "";
+    const apiCid: string = apiResults?.pubchemCid || "";
 
-Extracted Item Name: "${chemicalName}"
+    const prompt = `You are an expert in chemical nomenclature and identifiers.
+You are given an extracted chemical/element name from a Reference Material document, the context of where it was found, and structured identifier data resolved from PubChem and CAS Common Chemistry.
+
+Extracted Chemical Name: "${chemicalName}"
 Context: ${context}
 
-API Lookup Results:
-- Matched Name: ${apiResults?.matchedName || 'N/A'}
-- PubChem CID: ${apiResults?.pubchemCid || 'N/A'}
-- InChIKey: ${apiResults?.inchiKey || 'N/A'}
-- Molecular Formula: ${apiResults?.molecularFormula || 'N/A'}
-- IUPAC Name: ${apiResults?.iupacName || 'N/A'}
-- Standard Reference CAS (from Database): ${apiResults?.knownCas || 'N/A'}
-- Candidate CAS Numbers (checksum verified): ${JSON.stringify(apiResults?.casCandidates || [])}
+Resolved API Data:
+${JSON.stringify(apiResults, null, 2)}
 
 Task:
-Determine the single correct primary CAS Registry Number and InChIKey for this chemical/element.
-1. CAS Registry Number:
-   - Select the standard primary CAS Registry Number for this chemical/element (e.g., for Copper select 7440-50-8, for Lead select 7439-92-1).
-   - If candidate CAS numbers or Standard Reference CAS are given, pick the most appropriate one.
-   - If no candidates were returned by the API, but this is a recognizable chemical or element, provide its correct official CAS Registry Number using your chemical domain knowledge.
-2. InChIKey:
-   - Provide the validated InChIKey from the API results or standard chemical structure.
-3. PubChem CID:
-   - Provide the PubChem CID (as a string) if known.
+Using the API data and the context, decide the correct identifiers for THIS chemical:
+1. **CAS Registry Number** — Choose the single best CAS number. The "casCandidates" array already contains validated CAS numbers (check-digit verified); the FIRST entry is normally the primary/preferred CAS from PubChem. Pick the candidate that best matches the chemical name and context. Only return a CAS that appears in "casCandidates". If "casCandidates" is empty, and only then, you may return a CAS you are certain about from the synonym sample; otherwise leave it empty.
+2. **InChIKey** — Use the "inchiKey" field from the API data (the PubChem property result). Return it without any prefix.
+3. **PubChem CID** — Use the "pubchemCid" field so the PubChem link can be constructed.
 
-Requirement:
-Whenever the item represents a chemical element, substance, or compound, at least 1 identifier (CAS or InChIKey) or both (CAS & InChIKey) should definitely be provided. Only return empty strings if the item is purely a physical/non-chemical parameter (e.g. density, tensile strength, grain size).`;
+IMPORTANT:
+- Prefer the deterministic fields ("casCandidates", "inchiKey", "pubchemCid") over guessing.
+- A property/element should ALWAYS get its identifier(s) when the API data provides them. Do NOT leave CAS empty if a valid candidate exists.
+- Return each identifier as an exact string; return an empty string only when the data genuinely does not support it.`;
+
+    let decided: { cas?: string; inchiKey?: string; pubchemCid?: string } = {};
 
     try {
-        const response = await generateContentWithModelFallback(ai, {
+        const response = await generateWithModelFallback(ai, {
             contents: prompt,
             config: {
                 responseMimeType: "application/json",
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
-                        cas: { type: Type.STRING, description: "The validated CAS number (e.g. 7440-50-8) or empty string." },
-                        inchiKey: { type: Type.STRING, description: "The validated InChIKey without prefixes or empty string." },
-                        pubchemCid: { type: Type.STRING, description: "The PubChem CID string if available or empty string." }
+                        cas: { type: Type.STRING, description: "The chosen validated CAS number from casCandidates (e.g. 7440-50-8), or empty string." },
+                        inchiKey: { type: Type.STRING, description: "The validated InChIKey without any prefixes, or empty string." },
+                        pubchemCid: { type: Type.STRING, description: "The PubChem CID (as a string) if available, or empty string." }
                     }
                 },
                 temperature: 0
@@ -649,43 +642,48 @@ Whenever the item represents a chemical element, substance, or compound, at leas
         const text = response.text;
         if (text) {
             const cleaned = text.replace(/^```json/i, '').replace(/```$/i, '').trim();
-            const parsed = JSON.parse(cleaned);
-
-            let decidedCas = (parsed.cas || "").trim();
-            let decidedInchiKey = (parsed.inchiKey || "").trim();
-            let decidedCid = (parsed.pubchemCid || "").trim();
-
-            // Validate CAS from AI; fallback to known/candidate CAS if AI returned invalid or empty
-            if (!isValidCas(decidedCas)) {
-                decidedCas = defaultCas || "";
-            }
-
-            if (!decidedInchiKey && defaultInchiKey) {
-                decidedInchiKey = defaultInchiKey;
-            }
-
-            if (!decidedCid && defaultPubchemCid) {
-                decidedCid = defaultPubchemCid;
-            }
-
-            return {
-                cas: decidedCas || undefined,
-                inchiKey: decidedInchiKey || undefined,
-                pubchemCid: decidedCid || undefined
-            };
+            decided = JSON.parse(cleaned) || {};
         }
-
-        return {
-            cas: defaultCas,
-            inchiKey: defaultInchiKey,
-            pubchemCid: defaultPubchemCid
-        };
     } catch (e) {
         console.error("Error in decideChemicalIdentifiers LLM call:", e);
-        return {
-            cas: defaultCas,
-            inchiKey: defaultInchiKey,
-            pubchemCid: defaultPubchemCid
-        };
+        decided = {};
     }
+
+    // ---- Deterministic safety net -------------------------------------------------
+    // The LLM frequently returned InChIKey correctly but dropped CAS (it was buried in a
+    // large synonym list). Now that we have check-digit-validated candidates, guarantee the
+    // identifiers get filled from the API data whenever the model failed to.
+
+    // CAS: accept the model's choice only if it's a valid candidate; otherwise fall back to
+    // the primary (first) validated candidate.
+    let finalCas = (decided.cas || "").trim();
+    if (finalCas) {
+        // Keep the model's pick only if it is a genuinely valid CAS (and, when we have a
+        // candidate list, one of the candidates). This filters out hallucinated numbers.
+        const isKnownCandidate = casCandidates.includes(finalCas);
+        if (!isKnownCandidate && (!isValidCas(finalCas) || casCandidates.length > 0)) {
+            finalCas = "";
+        }
+    }
+    if (!finalCas && casCandidates.length > 0) {
+        finalCas = casCandidates[0];
+    }
+
+    // InChIKey: fall back to the PubChem property value if the model omitted it.
+    let finalInchiKey = (decided.inchiKey || "").trim();
+    if (!finalInchiKey && apiInchiKey) {
+        finalInchiKey = apiInchiKey;
+    }
+
+    // PubChem CID: fall back to the API value.
+    let finalCid = (decided.pubchemCid || "").trim();
+    if (!finalCid && apiCid) {
+        finalCid = apiCid;
+    }
+
+    const result: { cas?: string; inchiKey?: string; pubchemCid?: string } = {};
+    if (finalCas) result.cas = finalCas;
+    if (finalInchiKey) result.inchiKey = finalInchiKey;
+    if (finalCid) result.pubchemCid = finalCid;
+    return result;
 };

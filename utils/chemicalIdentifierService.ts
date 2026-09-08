@@ -1,163 +1,124 @@
-import { getCasNumber } from './casMapping';
-
 export interface ChemicalApiResults {
-    queryName: string;
-    matchedName?: string;
+    // Clean, focused fields extracted deterministically from the raw API responses.
+    // Keeping this compact (instead of dumping huge raw synonym lists) makes the
+    // downstream LLM decision far more reliable — especially for CAS numbers.
     pubchemCid?: string;
     inchiKey?: string;
     molecularFormula?: string;
     iupacName?: string;
-    casCandidates: string[];
-    knownCas?: string;
+    /** Validated CAS numbers (passed the CAS check-digit test) pulled from PubChem synonyms + CAS Common Chemistry. */
+    casCandidates?: string[];
+    /** A small sample of synonyms for the model to use as context (NOT the full list). */
+    synonymSample?: string[];
+    /** Raw CAS Common Chemistry search result (may be empty if the endpoint is blocked by CORS). */
+    casCommonChemistry?: any;
 }
 
+// A CAS Registry Number is 2–7 digits, then 2 digits, then a single check digit: e.g. 7440-50-8
+const CAS_REGEX = /\b(\d{2,7}-\d{2}-\d)\b/;
+
 /**
- * Validates a CAS Registry Number using the standard checksum algorithm:
- * Format: A-B-C where A is 2-7 digits, B is 2 digits, C is 1 check digit.
- * Sum = (d_n * n) + ... + (d_1 * 1) modulo 10 == C
+ * Validates a CAS Registry Number using its check digit.
+ * The last digit is a checksum: sum(digit_i * position_i) mod 10, counting positions
+ * from right to left starting at 1, over all digits except the check digit.
  */
-export const isValidCas = (cas: string | undefined | null): boolean => {
-    if (!cas || typeof cas !== 'string') return false;
-    const trimmed = cas.trim();
-    if (!/^\d{2,7}-\d{2}-\d$/.test(trimmed)) return false;
-    
-    const parts = trimmed.split('-');
-    const digits = parts[0] + parts[1];
-    const checkDigit = parseInt(parts[2], 10);
-    
+export const isValidCas = (cas: string): boolean => {
+    const m = cas.match(/^(\d{2,7})-(\d{2})-(\d)$/);
+    if (!m) return false;
+    const digits = (m[1] + m[2]).split('').map(Number);
+    const check = Number(m[3]);
     let sum = 0;
+    // Right-most digit (just before the check digit) has weight 1.
     for (let i = 0; i < digits.length; i++) {
         const weight = digits.length - i;
-        sum += parseInt(digits[i], 10) * weight;
+        sum += digits[i] * weight;
     }
-    
-    return sum % 10 === checkDigit;
+    return (sum % 10) === check;
 };
 
 /**
- * Generate candidate search terms from an extracted chemical name.
- * e.g. "Copper (Cu)" -> ["Copper (Cu)", "Copper", "Cu"]
- *      "Mass fraction of Zn" -> ["Mass fraction of Zn", "Zn"]
- *      "Fe (total)" -> ["Fe (total)", "Fe"]
- *      "Carbon, C" -> ["Carbon, C", "Carbon", "C"]
+ * Extracts all valid, unique CAS numbers from a list of arbitrary strings (e.g. PubChem synonyms).
+ * PubChem conventionally lists the primary/preferred CAS first among the CAS-formatted synonyms,
+ * so ordering is preserved.
  */
-export const generateSearchTerms = (name: string): string[] => {
-    const terms: string[] = [];
-    if (!name || typeof name !== 'string') return terms;
-    
-    const trimmed = name.trim();
-    if (!trimmed) return terms;
-    terms.push(trimmed);
-
-    // 1. Remove prefixes like "Mass fraction of", "Total", "Dissolved", "Elemental"
-    const cleanedPrefix = trimmed
-        .replace(/^(?:mass fraction of|mass fraction|total|dissolved|elemental|fraction of|content of)\s+/i, '')
-        .replace(/\s+(?:total|mass fraction|dissolved|elemental)$/i, '')
-        .trim();
-    if (cleanedPrefix && !terms.includes(cleanedPrefix)) {
-        terms.push(cleanedPrefix);
-    }
-
-    // 2. Extract outside and inside parentheses: e.g. "Copper (Cu)" -> "Copper", "Cu"
-    const parenMatch = trimmed.match(/^([^(]+)\(([^)]+)\)/);
-    if (parenMatch) {
-        const outside = parenMatch[1].trim();
-        const inside = parenMatch[2].trim();
-        if (outside && !terms.includes(outside)) terms.push(outside);
-        if (inside && !terms.includes(inside)) terms.push(inside);
-    }
-
-    // 3. Handle comma / slash separated: e.g. "Carbon, C" -> "Carbon", "C"
-    if (trimmed.includes(',') || trimmed.includes('/')) {
-        const parts = trimmed.split(/[,/]/).map(p => p.trim()).filter(Boolean);
-        for (const p of parts) {
-            if (!terms.includes(p)) terms.push(p);
+const extractValidCasNumbers = (candidates: string[]): string[] => {
+    const found: string[] = [];
+    for (const raw of candidates) {
+        if (!raw) continue;
+        const match = String(raw).match(CAS_REGEX);
+        if (match) {
+            const cas = match[1];
+            if (isValidCas(cas) && !found.includes(cas)) {
+                found.push(cas);
+            }
         }
     }
-
-    return terms;
+    return found;
 };
 
 export const lookupChemicalIdentifiers = async (name: string): Promise<ChemicalApiResults> => {
-    const searchTerms = generateSearchTerms(name);
-    const results: ChemicalApiResults = {
-        queryName: name,
-        casCandidates: []
-    };
+    const results: ChemicalApiResults = {};
+    const safeName = encodeURIComponent(name.trim());
+    const casCandidates: string[] = [];
 
-    // 1. Check local CAS database from casMapping
-    for (const term of searchTerms) {
-        const cas = getCasNumber(term);
-        if (cas && isValidCas(cas)) {
-            results.knownCas = cas;
-            if (!results.casCandidates.includes(cas)) {
-                results.casCandidates.push(cas);
+    // 1. PubChem Properties (CID, InChIKey, MolecularFormula, IUPACName)
+    // Isolated so a failure here does not prevent the synonym / CAS lookups below.
+    try {
+        const pubchemPropRes = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${safeName}/property/InChIKey,MolecularFormula,IUPACName/JSON`);
+        if (pubchemPropRes.ok) {
+            const json = await pubchemPropRes.json();
+            const prop = json?.PropertyTable?.Properties?.[0];
+            if (prop) {
+                results.pubchemCid = prop.CID != null ? String(prop.CID) : undefined;
+                results.inchiKey = prop.InChIKey || undefined;
+                results.molecularFormula = prop.MolecularFormula || undefined;
+                results.iupacName = prop.IUPACName || undefined;
             }
-            break;
         }
+    } catch (err) {
+        console.warn(`PubChem property lookup failed for "${name}":`, err);
     }
 
-    // 2. Try PubChem with candidate terms until properties are found
-    for (const term of searchTerms) {
-        const safeTerm = encodeURIComponent(term);
-        try {
-            const pubchemPropRes = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${safeTerm}/property/InChIKey,MolecularFormula,IUPACName/JSON`);
-            if (pubchemPropRes.ok) {
-                const propData = await pubchemPropRes.json();
-                const firstProp = propData?.PropertyTable?.Properties?.[0];
-                if (firstProp) {
-                    results.matchedName = term;
-                    results.pubchemCid = firstProp.CID ? String(firstProp.CID) : undefined;
-                    results.inchiKey = firstProp.InChIKey || undefined;
-                    results.molecularFormula = firstProp.MolecularFormula || undefined;
-                    results.iupacName = firstProp.IUPACName || undefined;
-
-                    // Fetch synonyms for this matched CID / term to extract CAS numbers
-                    const cid = firstProp.CID;
-                    const synUrl = cid 
-                        ? `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/${cid}/synonyms/JSON`
-                        : `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${safeTerm}/synonyms/JSON`;
-                    
-                    const pubchemSynRes = await fetch(synUrl);
-                    if (pubchemSynRes.ok) {
-                        const synData = await pubchemSynRes.json();
-                        const synList: string[] = synData?.InformationList?.Information?.[0]?.Synonym || [];
-                        for (const syn of synList) {
-                            if (isValidCas(syn) && !results.casCandidates.includes(syn)) {
-                                results.casCandidates.push(syn);
-                            }
-                        }
-                    }
-                    break; // Found primary match
+    // 2. PubChem Synonyms — this is where CAS numbers live. We extract them deterministically
+    //    (with check-digit validation) instead of relying on the LLM to spot them in a huge list.
+    try {
+        const pubchemSynRes = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${safeName}/synonyms/JSON`);
+        if (pubchemSynRes.ok) {
+            const json = await pubchemSynRes.json();
+            const synonyms: string[] = json?.InformationList?.Information?.[0]?.Synonym || [];
+            if (Array.isArray(synonyms) && synonyms.length > 0) {
+                // Pull out valid CAS numbers (ordered — PubChem lists the primary CAS first).
+                for (const cas of extractValidCasNumbers(synonyms)) {
+                    if (!casCandidates.includes(cas)) casCandidates.push(cas);
                 }
+                // Provide a small, useful synonym sample for LLM context (avoid dumping hundreds).
+                results.synonymSample = synonyms.slice(0, 15);
             }
-        } catch (err) {
-            console.warn(`PubChem lookup failed for term "${term}":`, err);
         }
+    } catch (err) {
+        console.warn(`PubChem synonyms lookup failed for "${name}":`, err);
     }
 
-    // 3. Fallback to NCI/NIH CIR (Chemical Identifier Resolver) if no CAS found yet
-    if (results.casCandidates.length === 0) {
-        for (const term of searchTerms) {
-            try {
-                const safeTerm = encodeURIComponent(term);
-                const cirRes = await fetch(`https://cactus.nci.nih.gov/chemical/structure/${safeTerm}/cas`);
-                if (cirRes.ok) {
-                    const text = await cirRes.text();
-                    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-                    for (const line of lines) {
-                        if (isValidCas(line) && !results.casCandidates.includes(line)) {
-                            results.casCandidates.push(line);
-                        }
-                    }
-                    if (results.casCandidates.length > 0) {
-                        break;
-                    }
-                }
-            } catch (e) {
-                // Ignore CIR network failures
+    // 3. CAS Common Chemistry Search (validation / fallback). This endpoint is sometimes blocked
+    //    by CORS in the browser — that's fine, it's isolated and we already have PubChem candidates.
+    try {
+        const casRes = await fetch(`https://commonchemistry.cas.org/api/search?q=${safeName}`);
+        if (casRes.ok) {
+            const json = await casRes.json();
+            results.casCommonChemistry = json;
+            const rns: string[] = (json?.results || [])
+                .map((r: any) => r?.rn)
+                .filter(Boolean);
+            for (const cas of extractValidCasNumbers(rns)) {
+                if (!casCandidates.includes(cas)) casCandidates.push(cas);
             }
         }
+    } catch (err) {
+        console.warn(`CAS Common Chemistry lookup failed for "${name}":`, err);
+    }
+
+    if (casCandidates.length > 0) {
+        results.casCandidates = casCandidates;
     }
 
     return results;
