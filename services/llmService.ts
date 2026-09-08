@@ -3,6 +3,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { DRMD } from "../types";
 import { convertToDSI } from "../utils/unitConverter";
+import { isValidCas } from "../utils/chemicalIdentifierService";
 
 const SYSTEM_INSTRUCTION = `
 You are an expert in Reference Material documents (both Certificates and Product Information Sheets). Extract structured data from a PDF into DRMD JSON format.
@@ -341,6 +342,18 @@ const RESPONSE_SCHEMA = {
                                             coverageProbability: { type: Type.STRING },
                                             distribution: { type: Type.STRING },
                                             method: { type: Type.STRING, description: "If the table has a USED METHODS or Method column, extract the full method text for this specific quantity row." },
+                                            identifiers: {
+                                                type: Type.ARRAY,
+                                                items: {
+                                                    type: Type.OBJECT,
+                                                    properties: {
+                                                        scheme: { type: Type.STRING, description: "Scheme e.g. 'CAS' or 'InChIKey'" },
+                                                        value: { type: Type.STRING, description: "Identifier value e.g. '7440-50-8'" },
+                                                        link: { type: Type.STRING }
+                                                    }
+                                                },
+                                                description: "Any chemical identifiers explicitly present in the document for this quantity/property."
+                                            },
                                             fieldCoordinates: QuantityCoordSchema
                                         }
                                     }
@@ -541,26 +554,45 @@ export const decideChemicalIdentifiers = async (
     apiResults: any,
     apiKey: string
 ): Promise<{ cas?: string; inchiKey?: string; pubchemCid?: string }> => {
-    if (!apiResults || Object.keys(apiResults).length === 0) return {};
-    
+    // Basic fallback values from pre-resolved API results
+    const defaultCas = apiResults?.knownCas || apiResults?.casCandidates?.[0] || undefined;
+    const defaultInchiKey = apiResults?.inchiKey || undefined;
+    const defaultPubchemCid = apiResults?.pubchemCid || undefined;
+
+    if (!apiKey) {
+        return { cas: defaultCas, inchiKey: defaultInchiKey, pubchemCid: defaultPubchemCid };
+    }
+
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
-    const prompt = `You are an expert in chemical nomenclature and identifiers.
-You are given an extracted chemical/element name from a Reference Material document, the context of where it was found, and raw API search results from PubChem and CAS Common Chemistry.
+    const prompt = `You are a world-class expert in chemical nomenclature, metallurgy, and chemical identifiers.
+You are given an extracted chemical/element name from a Certified Reference Material (CRM) document, the context of where it was found, and pre-filtered API search results from PubChem and chemical registry databases.
 
-Extracted Chemical Name: "${chemicalName}"
+Extracted Item Name: "${chemicalName}"
 Context: ${context}
 
-API Results:
-${JSON.stringify(apiResults, null, 2)}
+API Lookup Results:
+- Matched Name: ${apiResults?.matchedName || 'N/A'}
+- PubChem CID: ${apiResults?.pubchemCid || 'N/A'}
+- InChIKey: ${apiResults?.inchiKey || 'N/A'}
+- Molecular Formula: ${apiResults?.molecularFormula || 'N/A'}
+- IUPAC Name: ${apiResults?.iupacName || 'N/A'}
+- Standard Reference CAS (from Database): ${apiResults?.knownCas || 'N/A'}
+- Candidate CAS Numbers (checksum verified): ${JSON.stringify(apiResults?.casCandidates || [])}
 
 Task:
-Determine the correct CAS Registry Number and InChIKey for this chemical.
-CAS numbers are typically found in the PubChem synonyms list formatted as digits with hyphens (e.g., 7440-50-8) or in the CAS API results.
-InChIKey is found in the PubChem property results.
-PubChem CID is also needed to construct the PubChem link.
+Determine the single correct primary CAS Registry Number and InChIKey for this chemical/element.
+1. CAS Registry Number:
+   - Select the standard primary CAS Registry Number for this chemical/element (e.g., for Copper select 7440-50-8, for Lead select 7439-92-1).
+   - If candidate CAS numbers or Standard Reference CAS are given, pick the most appropriate one.
+   - If no candidates were returned by the API, but this is a recognizable chemical or element, provide its correct official CAS Registry Number using your chemical domain knowledge.
+2. InChIKey:
+   - Provide the validated InChIKey from the API results or standard chemical structure.
+3. PubChem CID:
+   - Provide the PubChem CID (as a string) if known.
 
-If a match is found, return the precise identifiers. If no reliable match can be determined, return empty strings.`;
+Requirement:
+Whenever the item represents a chemical element, substance, or compound, at least 1 identifier (CAS or InChIKey) or both (CAS & InChIKey) should definitely be provided. Only return empty strings if the item is purely a physical/non-chemical parameter (e.g. density, tensile strength, grain size).`;
 
     try {
         const response = await ai.models.generateContent({
@@ -571,9 +603,9 @@ If a match is found, return the precise identifiers. If no reliable match can be
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
-                        cas: { type: Type.STRING, description: "The validated CAS number (e.g. 7440-50-8)." },
-                        inchiKey: { type: Type.STRING, description: "The validated InChIKey without any prefixes." },
-                        pubchemCid: { type: Type.STRING, description: "The PubChem CID (as a string) if available." }
+                        cas: { type: Type.STRING, description: "The validated CAS number (e.g. 7440-50-8) or empty string." },
+                        inchiKey: { type: Type.STRING, description: "The validated InChIKey without prefixes or empty string." },
+                        pubchemCid: { type: Type.STRING, description: "The PubChem CID string if available or empty string." }
                     }
                 },
                 temperature: 0
@@ -583,11 +615,43 @@ If a match is found, return the precise identifiers. If no reliable match can be
         const text = response.text;
         if (text) {
             const cleaned = text.replace(/^```json/i, '').replace(/```$/i, '').trim();
-            return JSON.parse(cleaned);
+            const parsed = JSON.parse(cleaned);
+
+            let decidedCas = (parsed.cas || "").trim();
+            let decidedInchiKey = (parsed.inchiKey || "").trim();
+            let decidedCid = (parsed.pubchemCid || "").trim();
+
+            // Validate CAS from AI; fallback to known/candidate CAS if AI returned invalid or empty
+            if (!isValidCas(decidedCas)) {
+                decidedCas = defaultCas || "";
+            }
+
+            if (!decidedInchiKey && defaultInchiKey) {
+                decidedInchiKey = defaultInchiKey;
+            }
+
+            if (!decidedCid && defaultPubchemCid) {
+                decidedCid = defaultPubchemCid;
+            }
+
+            return {
+                cas: decidedCas || undefined,
+                inchiKey: decidedInchiKey || undefined,
+                pubchemCid: decidedCid || undefined
+            };
         }
-        return {};
+
+        return {
+            cas: defaultCas,
+            inchiKey: defaultInchiKey,
+            pubchemCid: defaultPubchemCid
+        };
     } catch (e) {
         console.error("Error in decideChemicalIdentifiers LLM call:", e);
-        return {};
+        return {
+            cas: defaultCas,
+            inchiKey: defaultInchiKey,
+            pubchemCid: defaultPubchemCid
+        };
     }
 };
