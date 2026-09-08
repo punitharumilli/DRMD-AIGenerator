@@ -386,6 +386,43 @@ const RESPONSE_SCHEMA = {
     }
 } as const;
 
+const GEMINI_FLASH_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-2.0-flash'];
+
+export const generateContentWithModelFallback = async (
+    ai: any,
+    params: {
+        contents: any;
+        config?: any;
+    },
+    models: string[] = GEMINI_FLASH_MODELS
+): Promise<{ text: string; usedModel: string }> => {
+    let lastErr: any = null;
+    for (let i = 0; i < models.length; i++) {
+        const model = models[i];
+        try {
+            const response = await ai.models.generateContent({
+                model: model,
+                contents: params.contents,
+                config: params.config
+            });
+            return { text: response.text || '', usedModel: model };
+        } catch (err: any) {
+            lastErr = err;
+            const msg = (err?.message || '').toLowerCase();
+            const status = String(err?.status || '');
+            const isNotFound = status === '404' || status === 'NOT_FOUND' || 
+                msg.includes('404') || msg.includes('not_found') || 
+                msg.includes('no longer available') || msg.includes('not found');
+            if (isNotFound && i < models.length - 1) {
+                console.warn(`Model "${model}" not available (${err?.message || '404'}). Falling back to "${models[i + 1]}"...`);
+                continue;
+            }
+            throw err;
+        }
+    }
+    throw lastErr;
+};
+
 export const extractStructuredDataFromPdf = async (base64File: string, mimeType: string, apiKey: string, temperature: number = 0): Promise<Partial<DRMD>> => {
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
@@ -395,8 +432,7 @@ export const extractStructuredDataFromPdf = async (base64File: string, mimeType:
 
     while (attempt < maxRetries) {
         try {
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash', 
+            const response = await generateContentWithModelFallback(ai, {
                 contents: {
                     parts: [
                         {
@@ -517,8 +553,7 @@ If you find a strong match, extract its ID (the part after 'https://ror.org/') a
 If none of the candidates are a strong match for this specific producer, return an empty string for the rorId.`;
 
     try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+        const response = await generateContentWithModelFallback(ai, {
             contents: prompt,
             config: {
                 responseMimeType: "application/json",
@@ -595,8 +630,7 @@ Requirement:
 Whenever the item represents a chemical element, substance, or compound, at least 1 identifier (CAS or InChIKey) or both (CAS & InChIKey) should definitely be provided. Only return empty strings if the item is purely a physical/non-chemical parameter (e.g. density, tensile strength, grain size).`;
 
     try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+        const response = await generateContentWithModelFallback(ai, {
             contents: prompt,
             config: {
                 responseMimeType: "application/json",
