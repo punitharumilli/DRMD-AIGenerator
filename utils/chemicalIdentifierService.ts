@@ -1,3 +1,5 @@
+import { getCasNumber } from "./casMapping";
+
 export interface ChemicalApiResults {
     // Clean, focused fields extracted deterministically from the raw API responses.
     // Keeping this compact (instead of dumping huge raw synonym lists) makes the
@@ -6,7 +8,7 @@ export interface ChemicalApiResults {
     inchiKey?: string;
     molecularFormula?: string;
     iupacName?: string;
-    /** Validated CAS numbers (passed the CAS check-digit test) pulled from PubChem synonyms + CAS Common Chemistry. */
+    /** Validated CAS numbers (passed the CAS check-digit test), API + local element map. */
     casCandidates?: string[];
     /** A small sample of synonyms for the model to use as context (NOT the full list). */
     synonymSample?: string[];
@@ -16,6 +18,8 @@ export interface ChemicalApiResults {
 
 // A CAS Registry Number is 2–7 digits, then 2 digits, then a single check digit: e.g. 7440-50-8
 const CAS_REGEX = /\b(\d{2,7}-\d{2}-\d)\b/;
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
  * Validates a CAS Registry Number using its check digit.
@@ -28,7 +32,6 @@ export const isValidCas = (cas: string): boolean => {
     const digits = (m[1] + m[2]).split('').map(Number);
     const check = Number(m[3]);
     let sum = 0;
-    // Right-most digit (just before the check digit) has weight 1.
     for (let i = 0; i < digits.length; i++) {
         const weight = digits.length - i;
         sum += digits[i] * weight;
@@ -56,65 +59,94 @@ const extractValidCasNumbers = (candidates: string[]): string[] => {
     return found;
 };
 
+/**
+ * Fetches JSON with retry + exponential backoff. This is the key reliability fix:
+ * PubChem rate-limits (~5 requests/second) and returns HTTP 503 (PUGREST.ServerBusy)
+ * when a burst of lookups arrives together. Previously those failures were silent, so
+ * some elements ended up with no identifiers. We now retry the busy responses.
+ * Returns the parsed JSON, or null if the resource genuinely doesn't exist / keeps failing.
+ */
+const fetchJsonWithRetry = async (url: string, retries = 3): Promise<any> => {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            const res = await fetch(url);
+            if (res.ok) {
+                return await res.json();
+            }
+            // 404 → the name genuinely isn't in this database; don't retry.
+            if (res.status === 404) return null;
+            // 429 / 503 / other 5xx → server busy or transient; back off and retry.
+            if (res.status === 429 || res.status >= 500) {
+                if (attempt < retries) {
+                    await sleep(500 * Math.pow(2, attempt) + Math.floor(Math.random() * 300));
+                    continue;
+                }
+            }
+            return null;
+        } catch (err) {
+            // Network / CORS error → retry a couple of times, then give up quietly.
+            if (attempt < retries) {
+                await sleep(500 * Math.pow(2, attempt) + Math.floor(Math.random() * 300));
+                continue;
+            }
+            return null;
+        }
+    }
+    return null;
+};
+
 export const lookupChemicalIdentifiers = async (name: string): Promise<ChemicalApiResults> => {
     const results: ChemicalApiResults = {};
     const safeName = encodeURIComponent(name.trim());
     const casCandidates: string[] = [];
 
-    // 1. PubChem Properties (CID, InChIKey, MolecularFormula, IUPACName)
-    // Isolated so a failure here does not prevent the synonym / CAS lookups below.
-    try {
-        const pubchemPropRes = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${safeName}/property/InChIKey,MolecularFormula,IUPACName/JSON`);
-        if (pubchemPropRes.ok) {
-            const json = await pubchemPropRes.json();
-            const prop = json?.PropertyTable?.Properties?.[0];
-            if (prop) {
-                results.pubchemCid = prop.CID != null ? String(prop.CID) : undefined;
-                results.inchiKey = prop.InChIKey || undefined;
-                results.molecularFormula = prop.MolecularFormula || undefined;
-                results.iupacName = prop.IUPACName || undefined;
-            }
-        }
-    } catch (err) {
-        console.warn(`PubChem property lookup failed for "${name}":`, err);
+    // 1. PubChem Properties (CID, InChIKey, MolecularFormula, IUPACName) — with retry.
+    const propJson = await fetchJsonWithRetry(
+        `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${safeName}/property/InChIKey,MolecularFormula,IUPACName/JSON`
+    );
+    const prop = propJson?.PropertyTable?.Properties?.[0];
+    if (prop) {
+        results.pubchemCid = prop.CID != null ? String(prop.CID) : undefined;
+        results.inchiKey = prop.InChIKey || undefined;
+        results.molecularFormula = prop.MolecularFormula || undefined;
+        results.iupacName = prop.IUPACName || undefined;
     }
 
-    // 2. PubChem Synonyms — this is where CAS numbers live. We extract them deterministically
-    //    (with check-digit validation) instead of relying on the LLM to spot them in a huge list.
-    try {
-        const pubchemSynRes = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${safeName}/synonyms/JSON`);
-        if (pubchemSynRes.ok) {
-            const json = await pubchemSynRes.json();
-            const synonyms: string[] = json?.InformationList?.Information?.[0]?.Synonym || [];
-            if (Array.isArray(synonyms) && synonyms.length > 0) {
-                // Pull out valid CAS numbers (ordered — PubChem lists the primary CAS first).
-                for (const cas of extractValidCasNumbers(synonyms)) {
-                    if (!casCandidates.includes(cas)) casCandidates.push(cas);
-                }
-                // Provide a small, useful synonym sample for LLM context (avoid dumping hundreds).
-                results.synonymSample = synonyms.slice(0, 15);
-            }
+    // 2. PubChem Synonyms — CAS numbers live here. Extract them deterministically (with
+    //    check-digit validation) instead of relying on the LLM to spot them in a huge list.
+    const synJson = await fetchJsonWithRetry(
+        `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${safeName}/synonyms/JSON`
+    );
+    const synonyms: string[] = synJson?.InformationList?.Information?.[0]?.Synonym || [];
+    if (Array.isArray(synonyms) && synonyms.length > 0) {
+        for (const cas of extractValidCasNumbers(synonyms)) {
+            if (!casCandidates.includes(cas)) casCandidates.push(cas);
         }
-    } catch (err) {
-        console.warn(`PubChem synonyms lookup failed for "${name}":`, err);
+        results.synonymSample = synonyms.slice(0, 15);
     }
 
-    // 3. CAS Common Chemistry Search (validation / fallback). This endpoint is sometimes blocked
-    //    by CORS in the browser — that's fine, it's isolated and we already have PubChem candidates.
+    // 3. CAS Common Chemistry Search (validation / fallback). Often CORS-blocked in the
+    //    browser — that's fine, it's best-effort and we already have PubChem + local data.
     try {
         const casRes = await fetch(`https://commonchemistry.cas.org/api/search?q=${safeName}`);
         if (casRes.ok) {
             const json = await casRes.json();
             results.casCommonChemistry = json;
-            const rns: string[] = (json?.results || [])
-                .map((r: any) => r?.rn)
-                .filter(Boolean);
+            const rns: string[] = (json?.results || []).map((r: any) => r?.rn).filter(Boolean);
             for (const cas of extractValidCasNumbers(rns)) {
                 if (!casCandidates.includes(cas)) casCandidates.push(cas);
             }
         }
     } catch (err) {
-        console.warn(`CAS Common Chemistry lookup failed for "${name}":`, err);
+        // best effort only
+    }
+
+    // 4. LOCAL FALLBACK for elements. The app ships a full periodic-table CAS map, so even
+    //    if every network lookup above failed (rate limit, offline, CORS), an element name
+    //    or symbol (e.g. "Ni", "Nickel", "Fe") still yields a guaranteed, correct CAS.
+    const localCas = getCasNumber(name);
+    if (localCas && isValidCas(localCas) && !casCandidates.includes(localCas)) {
+        casCandidates.push(localCas);
     }
 
     if (casCandidates.length > 0) {

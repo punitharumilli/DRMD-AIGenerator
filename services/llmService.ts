@@ -150,6 +150,7 @@ Many certificates contain content in multiple languages (e.g., Portuguese and En
   - If city contains "Berlin" or "Adlershof", set countryCode="DE".
 - **Responsible Persons (Strict Parsing)**: 
   - Interpret the text block hierarchically: Line 1 (Top)→name, Line 2→role, Lines 3+ (Bottom)→description.
+  - **Description vs Role (CRITICAL — DO NOT DUPLICATE)**: The 'description' is ONLY for ADDITIONAL information beyond the name and role — e.g. a division/department, a specific area of work, or an extra qualifying sentence the certificate provides. NEVER copy the role/title text into the 'description'. If the block contains only a name and a role/title (no further text), leave 'description' EMPTY (""). Example: a block reading "Dr. S. Richter" / "Committee for Certification" → name="Dr. S. Richter", role="Committee for Certification", description="" (NOT "Committee for Certification" repeated).
   - **Multiple persons on the same line (CRITICAL)**:
     - Names of 2 or 3 persons are often written on a SINGLE line, separated by "/", "&", "and", or similar delimiters.
     - Example: "Dr. John Smith / Prof. Maria Garcia & Dr. Hans Müller" → THREE separate persons, NOT one person.

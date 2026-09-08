@@ -294,28 +294,21 @@ const PdfPage: React.FC<{
                     if (cancelled) return;
                     const Util = (window as any).pdfjsLib.Util;
 
-                    const itemRect = (item: any, fracStart = 0, fracEnd = 1) => {
-                        // Compose viewport transform with the item's own transform → device (CSS) space.
+                    // Full device-space rect for a whole text item.
+                    const itemRect = (item: any) => {
                         const tx = Util.transform(cssVp.transform, item.transform);
                         const fontHeight = Math.hypot(tx[2], tx[3]) || ((item.height || 0) * scale) || 10;
                         const fullWidth = (item.width || 0) * scale;
-                        // Unit vector of the text advance direction (handles rotated text too).
-                        const axisLen = Math.hypot(tx[0], tx[1]) || 1;
-                        const ux = tx[0] / axisLen;
-                        const uy = tx[1] / axisLen;
-                        const startX = tx[4] + ux * fullWidth * fracStart;
-                        const startY = tx[5] + uy * fullWidth * fracStart;
-                        const segWidth = fullWidth * (fracEnd - fracStart);
                         return {
-                            left: startX,
-                            top: startY - fontHeight,
-                            width: Math.max(segWidth, 2),
+                            left: tx[4],
+                            top: tx[5] - fontHeight,
+                            width: Math.max(fullWidth, 2),
                             height: fontHeight * 1.15
                         };
                     };
 
                     // Concatenate all items (spaces removed) so multi-item matches work,
-                    // tracking each item's span so we can highlight only the matched portion.
+                    // tracking each item's span so we can locate which items the match falls in.
                     let joined = '';
                     const spans: Array<{ start: number; end: number; item: any }> = [];
                     for (const item of textContent.items) {
@@ -326,27 +319,16 @@ const PdfPage: React.FC<{
                         spans.push({ start, end: joined.length, item });
                     }
 
-                    let matched = false;
-                    if (queryNoSpace.length > 3) {
-                        const idx = joined.indexOf(queryNoSpace);
-                        if (idx !== -1) {
-                            const mStart = idx;
-                            const mEnd = idx + queryNoSpace.length;
-                            for (const span of spans) {
-                                if (span.end > mStart && span.start < mEnd) {
-                                    const len = span.end - span.start;
-                                    const oS = Math.max(mStart, span.start);
-                                    const oE = Math.min(mEnd, span.end);
-                                    const fS = len > 0 ? (oS - span.start) / len : 0;
-                                    const fE = len > 0 ? (oE - span.start) / len : 1;
-                                    rects.push(itemRect(span.item, fS, fE));
-                                    matched = true;
-                                }
-                            }
+                    // Find the text items that belong to the match.
+                    const matchedItems = new Set<any>();
+                    const idx = queryNoSpace.length > 3 ? joined.indexOf(queryNoSpace) : -1;
+                    if (idx !== -1) {
+                        const mStart = idx;
+                        const mEnd = idx + queryNoSpace.length;
+                        for (const span of spans) {
+                            if (span.end > mStart && span.start < mEnd) matchedItems.add(span.item);
                         }
-                    }
-
-                    if (!matched) {
+                    } else {
                         for (const item of textContent.items) {
                             const str = (((item as any).str) || '').toLowerCase().trim();
                             const sNoSpace = str.replace(/\s+/g, '');
@@ -358,11 +340,34 @@ const PdfPage: React.FC<{
                                 const words = str.split(/[\s,.\-]+/);
                                 if (words.includes(query)) isMatch = true;
                             }
-                            if (isMatch) {
-                                rects.push(itemRect(item as any));
-                                matched = true;
-                                break;
-                            }
+                            if (isMatch) { matchedItems.add(item); break; }
+                        }
+                    }
+
+                    // Highlight the FULL LINE(S) that contain the matched text. A value sitting
+                    // inside a sentence/paragraph (e.g. "…is 0.1 g.") then gets a clean box over
+                    // its whole line instead of a drifting fragment box. We group every text item
+                    // into lines by vertical position and box each line that holds a matched item.
+                    if (matchedItems.size > 0) {
+                        const withRect = spans.map(s => {
+                            const r = itemRect(s.item);
+                            return { item: s.item, r, cy: r.top + r.height / 2, h: r.height };
+                        });
+                        const lines: Array<{ cy: number; h: number; items: typeof withRect }> = [];
+                        for (const it of [...withRect].sort((a, b) => a.cy - b.cy)) {
+                            let line = lines.find(L => Math.abs(L.cy - it.cy) <= Math.max(L.h, it.h) * 0.6);
+                            if (!line) { line = { cy: it.cy, h: it.h, items: [] }; lines.push(line); }
+                            line.items.push(it);
+                            line.h = Math.max(line.h, it.h);
+                            line.cy = line.items.reduce((sum, x) => sum + x.cy, 0) / line.items.length;
+                        }
+                        for (const L of lines) {
+                            if (!L.items.some(x => matchedItems.has(x.item))) continue;
+                            const left = Math.min(...L.items.map(x => x.r.left));
+                            const right = Math.max(...L.items.map(x => x.r.left + x.r.width));
+                            const top = Math.min(...L.items.map(x => x.r.top));
+                            const bottom = Math.max(...L.items.map(x => x.r.top + x.r.height));
+                            rects.push({ left, top, width: right - left, height: bottom - top });
                         }
                     }
                 }
@@ -1145,6 +1150,17 @@ const App: React.FC = () => {
           }
       });
 
+      // Safeguard: the description must hold ADDITIONAL info (division, area of work), not a
+      // copy of the role. If it just repeats the role/name, clear it so the field is empty.
+      newPersons.forEach((person: any) => {
+          const desc = (person.description || "").trim();
+          const role = (person.role || "").trim();
+          const name = (person.name || "").trim();
+          if (desc && (desc.toLowerCase() === role.toLowerCase() || desc.toLowerCase() === name.toLowerCase())) {
+              person.description = "";
+          }
+      });
+
       // Chemical Identifiers Resolution
       const uniqueChemicals = new Map<string, any>();
 
@@ -1160,16 +1176,42 @@ const App: React.FC = () => {
 
       newMats.forEach((m: any) => {
           if (m.name && !uniqueChemicals.has(m.name.toLowerCase())) {
-              uniqueChemicals.set(m.name.toLowerCase(), { name: m.name, context: 'Material' });
+              // Use the material name AND its description (if any) as context, so the AI can
+              // resolve a chemical identity from richer information — same lookup used for
+              // property elements, applied to the material.
+              const desc = (m.description || "").trim();
+              const context = desc
+                  ? `Reference material named "${m.name}". Description: ${desc}`
+                  : `Reference material named "${m.name}".`;
+              uniqueChemicals.set(m.name.toLowerCase(), { name: m.name, context });
           }
       });
 
       const resolvedChemicals = new Map<string, any>();
-      await Promise.all(Array.from(uniqueChemicals.values()).map(async (chem) => {
-          const apiResults = await lookupChemicalIdentifiers(chem.name);
-          const decided = await decideChemicalIdentifiers(chem.name, chem.context, apiResults, geminiApiKey);
-          resolvedChemicals.set(chem.name.toLowerCase(), decided);
-      }));
+      // Resolve identifiers with LIMITED CONCURRENCY. Firing every lookup at once
+      // overwhelms PubChem's rate limit (~5 requests/sec) and a chunk of them silently
+      // fail (503), which is why some elements came back with no CAS/InChIKey. A small
+      // pool keeps us under the limit while still being reasonably fast.
+      {
+          const chemList = Array.from(uniqueChemicals.values());
+          const CONCURRENCY = 3;
+          let cursor = 0;
+          const worker = async () => {
+              while (cursor < chemList.length) {
+                  const chem = chemList[cursor++];
+                  try {
+                      const apiResults = await lookupChemicalIdentifiers(chem.name);
+                      const decided = await decideChemicalIdentifiers(chem.name, chem.context, apiResults, geminiApiKey);
+                      resolvedChemicals.set(chem.name.toLowerCase(), decided);
+                  } catch (e) {
+                      console.warn(`Identifier resolution failed for "${chem.name}":`, e);
+                  }
+              }
+          };
+          await Promise.all(
+              Array.from({ length: Math.min(CONCURRENCY, chemList.length) }, () => worker())
+          );
+      }
 
       finalProps.forEach(p => {
           p.results.forEach((r: any) => {
@@ -1853,16 +1895,20 @@ const App: React.FC = () => {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-3">
                         <Input label={drmdData.administrativeData.title === "referenceMaterialCertificate" ? "Name *" : "Name"} value={mat.name} onFocus={() => handleHighlight(mat.fieldCoordinates?.name, mat.sectionCoordinates, mat.name, mat.originalTexts?.name)} onChange={(v) => { const list = [...drmdData.materials]; list[idx].name = v; setDrmdData(p => ({...p, materials: list})); }} onInfoClick={() => handleHighlight(mat.fieldCoordinates?.name, mat.sectionCoordinates, mat.name, mat.originalTexts?.name)} />
-                        <Input label="RM Code (e.g. BAM-M386a)" value={mat.rmCode || ""} onChange={(v) => { const list = [...drmdData.materials]; list[idx].rmCode = v; setDrmdData(p => ({...p, materials: list})); }} />
+                        <Input label="RM Code (e.g. BAM-M386a)" value={mat.rmCode || ""} onChange={(v) => { const list = [...drmdData.materials]; list[idx].rmCode = v; setDrmdData(p => ({...p, materials: list})); }} onFocus={() => handleHighlight(mat.rmCode)} onInfoClick={() => handleHighlight(mat.rmCode)} />
                         <Input label="Assigned Material Identifier (XML ID)" value={mat.xmlId || ""} onChange={(v) => { const list = [...drmdData.materials]; list[idx].xmlId = v; setDrmdData(p => ({...p, materials: list})); }} />
                         
                         {mat.materialIdentifiers.map((mid, midIdx) => {
+                             // CAS / InChIKey are chemical identifiers — shown in their own
+                             // section below, NOT as editable Batch/Lot rows.
+                             const schemeLower = (mid.scheme || "").toLowerCase();
+                             if (schemeLower === 'cas' || schemeLower === 'inchikey') return null;
                              const hasScheme = mid.scheme && mid.scheme !== "MaterialID" && mid.scheme.trim() !== "";
                              const compositeValue = hasScheme ? `${mid.scheme}-${mid.value}` : mid.value;
                              return (
-                                 <Input 
+                                 <Input
                                      key={midIdx}
-                                     label="Material Identifier (e.g. Batch, Lot)" 
+                                     label="Material Identifier (e.g. Batch, Lot)"
                                      value={compositeValue}
                                      onFocus={() => handleHighlight(mat.fieldCoordinates?.materialIdentifiers, mat.sectionCoordinates, compositeValue.trim())}
                                      onChange={(val) => {
@@ -1886,6 +1932,32 @@ const App: React.FC = () => {
                                  />
                              );
                         })}
+
+                        {/* Material Identifier — CAS / InChIKey, resolved from the material name + description */}
+                        {(() => {
+                            const chemIds = (mat.materialIdentifiers || []).filter((mid: any) => {
+                                const s = (mid.scheme || "").toLowerCase();
+                                return (s === 'cas' || s === 'inchikey') && mid.value && mid.value.trim() !== '';
+                            });
+                            return (
+                                <div className="space-y-1">
+                                    <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide">Material Identifier (CAS / InChIKey)</label>
+                                    <div className="w-full border border-gray-200 bg-gray-50 rounded-md p-2 text-[11px] font-mono text-gray-600 flex flex-col gap-1 min-h-[36px]">
+                                        {chemIds.length > 0
+                                            ? chemIds.map((id: any, i: number) => (
+                                                <div key={i}>
+                                                    <span className="font-bold">{id.scheme}:</span>{' '}
+                                                    {id.link
+                                                        ? <a href={id.link} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline break-all">{id.value}</a>
+                                                        : <span className="break-all">{id.value}</span>}
+                                                </div>
+                                            ))
+                                            : <span className="text-gray-400">No chemical identifier found for this material</span>
+                                        }
+                                    </div>
+                                </div>
+                            );
+                        })()}
 
                         <Input label="Material Class" value={mat.materialClass} onFocus={() => handleHighlight(mat.fieldCoordinates?.materialClass, mat.sectionCoordinates, mat.materialClass, mat.originalTexts?.materialClass)} onChange={(v) => { const list = [...drmdData.materials]; list[idx].materialClass = v; setDrmdData(p => ({...p, materials: list})); }} onInfoClick={() => handleHighlight(mat.fieldCoordinates?.materialClass, mat.sectionCoordinates, mat.materialClass, mat.originalTexts?.materialClass)} />
                         
