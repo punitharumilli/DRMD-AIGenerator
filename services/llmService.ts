@@ -6,53 +6,113 @@ import { convertToDSI } from "../utils/unitConverter";
 import { isValidCas } from "../utils/chemicalIdentifierService";
 
 // ---- Model configuration ----------------------------------------------------
-// Primary model plus a lower-version multimodal-capable fallback. The fallback is
-// tried automatically if the primary model is unavailable (e.g. not enabled for the
-// API key, or a "model not found" error). All models listed here support multimodal
-// (PDF/vision) input, so they are safe for the document-extraction call.
-const PRIMARY_MODEL = 'gemini-3.6-flash';
-const FALLBACK_MODEL = 'gemini-2.5-flash';
-const MODEL_CHAIN = [PRIMARY_MODEL, FALLBACK_MODEL];
+// Fallback chain, tried in order. When a model is BUSY (overloaded / high demand)
+// we retry it a few times with exponential backoff before moving to the next model;
+// when a model is UNAVAILABLE (not found / not enabled for the key) we skip straight
+// to the next one. All models here support multimodal (PDF/vision) input, so the chain
+// is safe for the document-extraction call as well as the text-only calls.
+const MODEL_CHAIN = [
+    'gemini-3.5-flash',
+    'gemini-3.6-flash',
+    'gemini-3.7-flash',
+    'gemini-3.8-flash',
+];
 
-// Errors that indicate the model itself is unusable, so we should try the next model
-// in the chain rather than surfacing the error.
+// How hard to retry a single model while it is busy, before falling through to the next.
+const MAX_ATTEMPTS_PER_MODEL = 4;
+const BASE_BACKOFF_MS = 1500;
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Errors that mean the model itself is unusable → skip to the next model immediately.
 const isModelUnavailableError = (error: any): boolean => {
     const status = error?.status;
     const msg = String(error?.message || '').toLowerCase();
     return (
         status === 404 ||
         msg.includes('not found') ||
-        msg.includes('not supported') ||
         msg.includes('does not exist') ||
+        msg.includes('not supported') ||
         msg.includes('unsupported model') ||
-        msg.includes('permission') && msg.includes('model')
+        (msg.includes('permission') && msg.includes('model'))
+    );
+};
+
+// Transient "busy" errors (overloaded / high demand / rate limited) → retry, then fall through.
+const isTransientError = (error: any): boolean => {
+    const status = error?.status;
+    const msg = String(error?.message || '').toLowerCase();
+    return (
+        status === 429 || status === 500 || status === 503 ||
+        msg.includes('overloaded') ||
+        msg.includes('high demand') ||
+        msg.includes('unavailable') ||
+        msg.includes('try again') ||
+        msg.includes('temporarily') ||
+        msg.includes('rate limit') ||
+        msg.includes('resource has been exhausted') ||
+        msg.includes('exhausted') ||
+        msg.includes('429') || msg.includes('500') || msg.includes('503')
     );
 };
 
 /**
- * Runs a generateContent call, transparently falling back through MODEL_CHAIN if the
- * primary model is unavailable. Non-model errors (rate limits, bad requests) are re-thrown
- * so the caller's own retry/error handling still applies.
+ * Runs a generateContent call resiliently:
+ *  - Retries the SAME model with exponential backoff while it is busy/overloaded
+ *    (this is the key fix: the app no longer throws immediately on a demand spike —
+ *    it waits and retries, the way the chat interface does).
+ *  - Falls through to the next model in MODEL_CHAIN when a model is unavailable, or
+ *    when it stays busy after all retries.
+ *  - Re-throws genuine errors (bad request, invalid API key, etc.) immediately.
+ * The optional onStatus callback lets the UI show what's happening ("Model busy, retrying…").
  */
 const generateWithModelFallback = async (
     ai: GoogleGenAI,
-    params: { contents: any; config?: any }
+    params: { contents: any; config?: any },
+    onStatus?: (message: string) => void
 ) => {
     let lastErr: any = null;
-    for (let i = 0; i < MODEL_CHAIN.length; i++) {
-        const model = MODEL_CHAIN[i];
-        try {
-            return await ai.models.generateContent({ ...params, model } as any);
-        } catch (error: any) {
-            lastErr = error;
-            const hasNext = i < MODEL_CHAIN.length - 1;
-            if (hasNext && isModelUnavailableError(error)) {
-                console.warn(`Model "${model}" unavailable, falling back to "${MODEL_CHAIN[i + 1]}".`, error?.message || error);
-                continue;
+
+    for (let m = 0; m < MODEL_CHAIN.length; m++) {
+        const model = MODEL_CHAIN[m];
+        const hasNextModel = m < MODEL_CHAIN.length - 1;
+
+        for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_MODEL; attempt++) {
+            try {
+                return await ai.models.generateContent({ ...params, model } as any);
+            } catch (error: any) {
+                lastErr = error;
+
+                // Model not available for this key → try the next model right away.
+                if (isModelUnavailableError(error)) {
+                    console.warn(`Model "${model}" unavailable — skipping to next model.`, error?.message || error);
+                    break;
+                }
+
+                // Busy / overloaded → wait and retry the same model a few times.
+                if (isTransientError(error)) {
+                    const moreAttempts = attempt < MAX_ATTEMPTS_PER_MODEL - 1;
+                    if (moreAttempts) {
+                        const backoff = BASE_BACKOFF_MS * Math.pow(2, attempt) + Math.floor(Math.random() * 500);
+                        console.warn(`Model "${model}" busy (attempt ${attempt + 1}/${MAX_ATTEMPTS_PER_MODEL}). Retrying in ${backoff}ms…`, error?.message || error);
+                        onStatus?.(`Model ${model} is experiencing high demand. Retrying… (attempt ${attempt + 1})`);
+                        await sleep(backoff);
+                        continue;
+                    }
+                    // Exhausted retries on this model → move to the next one if we have it.
+                    if (hasNextModel) {
+                        console.warn(`Model "${model}" still busy after ${MAX_ATTEMPTS_PER_MODEL} attempts — falling back to "${MODEL_CHAIN[m + 1]}".`);
+                        onStatus?.(`Switching to fallback model ${MODEL_CHAIN[m + 1]}…`);
+                    }
+                    break;
+                }
+
+                // Any other error (bad request, invalid key, schema error) → do not retry.
+                throw error;
             }
-            throw error;
         }
     }
+
     throw lastErr;
 };
 
@@ -425,42 +485,46 @@ const RESPONSE_SCHEMA = {
     }
 } as const;
 
-export const extractStructuredDataFromPdf = async (base64File: string, mimeType: string, apiKey: string, temperature: number = 0): Promise<Partial<DRMD>> => {
+export const extractStructuredDataFromPdf = async (
+    base64File: string,
+    mimeType: string,
+    apiKey: string,
+    temperature: number = 0,
+    onStatus?: (message: string) => void
+): Promise<Partial<DRMD>> => {
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
-    let attempt = 0;
-    const maxRetries = 3;
-    let lastError: any = null;
+    try {
+        // Retry-on-busy and model fallback are handled inside generateWithModelFallback:
+        // if the model is overloaded / high demand, it waits and retries (and finally falls
+        // through the model chain) instead of throwing immediately on the first spike.
+        const response = await generateWithModelFallback(ai, {
+            contents: {
+                parts: [
+                    {
+                        inlineData: {
+                            mimeType: mimeType,
+                            data: base64File
+                        }
+                    },
+                    { text: "Extract the structured data from this Reference Material Document." }
+                ]
+            },
+            config: {
+                systemInstruction: SYSTEM_INSTRUCTION,
+                responseMimeType: "application/json",
+                responseSchema: RESPONSE_SCHEMA,
+                temperature: temperature
+            }
+        }, onStatus);
 
-    while (attempt < maxRetries) {
-        try {
-            const response = await generateWithModelFallback(ai, {
-                contents: {
-                    parts: [
-                        {
-                            inlineData: {
-                                mimeType: mimeType,
-                                data: base64File
-                            }
-                        },
-                        { text: "Extract the structured data from this Reference Material Document." }
-                    ]
-                },
-                config: {
-                    systemInstruction: SYSTEM_INSTRUCTION,
-                    responseMimeType: "application/json",
-                    responseSchema: RESPONSE_SCHEMA,
-                    temperature: temperature
-                }
-            });
+        let jsonText = response.text;
+        if (!jsonText) throw new Error("No data returned from Gemini Vision");
 
-            let jsonText = response.text;
-            if (!jsonText) throw new Error("No data returned from Gemini Vision");
-            
-            // Sanitize markdown wrapper
-            jsonText = jsonText.replace(/^```json/i, '').replace(/```$/i, '').trim();
-            
-            const parsedData = JSON.parse(jsonText) as Partial<DRMD>;
+        // Sanitize markdown wrapper
+        jsonText = jsonText.replace(/^```json/i, '').replace(/```$/i, '').trim();
+
+        const parsedData = JSON.parse(jsonText) as Partial<DRMD>;
 
         // Post-processing: Parse originalTexts JSON strings into objects
         const parseOriginalTexts = (obj: any) => {
@@ -482,49 +546,35 @@ export const extractStructuredDataFromPdf = async (base64File: string, mimeType:
 
         // Post-processing: Calculate D-SI values for Table Quantities
         if (parsedData.properties) {
-             parsedData.properties.forEach(prop => {
-                 if (prop.results) {
-                     prop.results.forEach(res => {
-                         if (res.quantities) {
-                             res.quantities.forEach(q => {
-                                 const dsi = convertToDSI(q.value, q.unit);
-                                 (q as any).dsiValue = dsi.dsiValue;
-                                 (q as any).dsiUnit = dsi.dsiUnit;
-                             });
-                         }
-                     });
-                 }
-             });
+            parsedData.properties.forEach(prop => {
+                if (prop.results) {
+                    prop.results.forEach(res => {
+                        if (res.quantities) {
+                            res.quantities.forEach(q => {
+                                const dsi = convertToDSI(q.value, q.unit);
+                                (q as any).dsiValue = dsi.dsiValue;
+                                (q as any).dsiUnit = dsi.dsiUnit;
+                            });
+                        }
+                    });
+                }
+            });
         }
 
         // Removed destructive post-processing for Material Quantities (Item Quantities / Min Sample Size)
         // We now preserve exactly what Gemini extracted so the user can see/edit the raw text.
         // The DSI preview and conversion happens in the UI and XML Generation step respectively.
-        
+
         return parsedData;
 
-        } catch (error: any) {
-            console.error(`Gemini Extraction Error (Attempt ${attempt + 1}):`, error);
-            lastError = error;
-            
-            // Handle 429 Too Many Requests
-            if (error?.status === 429 || error?.message?.includes('429')) {
-                attempt++;
-                if (attempt < maxRetries) {
-                    const backoff = Math.pow(2, attempt) * 1000;
-                    console.log(`Rate limited. Retrying in ${backoff}ms...`);
-                    await new Promise(resolve => setTimeout(resolve, backoff));
-                    continue;
-                }
-            } else if (error?.status === 400 || error?.status === 403) {
-                // Do not retry on bad request or unauthorized
-                throw new Error(`API Error: ${error.message || 'Invalid Request / API Key'}`);
-            }
-            
-            throw new Error(`Failed to extract data: ${error.message || 'Unknown error'}`);
+    } catch (error: any) {
+        console.error("Gemini Extraction Error:", error);
+        if (error?.status === 400 || error?.status === 403) {
+            // Bad request or unauthorized — surface a clear message, no point retrying.
+            throw new Error(`API Error: ${error.message || 'Invalid Request / API Key'}`);
         }
+        throw new Error(`Failed to extract data: ${error.message || 'Unknown error'}`);
     }
-    throw lastError;
 };
 export const decideRorId = async (
     producerName: string,
